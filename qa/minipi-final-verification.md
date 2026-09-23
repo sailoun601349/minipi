@@ -305,7 +305,7 @@
 ## 六、测试数据与清理
 
 - 测试输入统一使用 `pretest_` 前缀（如 `pretest_第一次提问`、`pretest_回车发送`），**未写入任何被测产物**。
-- 脚手架与临时产物全部位于 `C:\Users\yang6\AppData\Local\Temp\minipi_qa\`（自建）：`final_v05.js`、`final_v05.json`、`final_v05.txt`、`page.js`、`cdp.js` 及截图；以及 Chrome 临时 profile `prof_final_v05_*`。
+- 脚手架与临时产物全部位于 `%TEMP%\minipi_qa\`（自建）：`final_v05.js`、`final_v05.json`、`final_v05.txt`、`page.js`、`cdp.js` 及截图；以及 Chrome 临时 profile `prof_final_v05_*`。
 - **被测目录未新增/修改任何文件**；`spike/pi-sdk/out/` 为 `npm run spike:offline` 真跑时按设计重新生成（已被该套件 `.gitignore` 覆盖）。
 - 清理状态：脚手架保留在 `%TEMP%`（属本机临时目录，可随时删）；**未触碰** `docs/`、`prototype/`、`spike/` 下源码。
 

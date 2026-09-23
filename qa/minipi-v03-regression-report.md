@@ -19,7 +19,7 @@
 | 测试数据 | 输入串统一 `pretest_` 前缀（`pretest_第二个问题`、`pretest_代码块` 等），仅存在于页面内存，未落盘 |
 | 被测文件实测指纹 | `117955B` / `2215` 行 / `sha256=239ab1383596479d…` / `mtime=2026-09-22T02:48:40Z`（任务书写「约 2225 行」，实测 **2215** 行） |
 
-**本轮新增脚本与原始证据**（均在 `C:\Users\yang6\AppData\Local\Temp\minipi_qa\`，未写入项目目录）：
+**本轮新增脚本与原始证据**（均在 `%TEMP%\minipi_qa\`，未写入项目目录）：
 
 ```
 qa_v03_core.js        → qa_v03_core.json        # 核心修复项 + a11y + maplist + 自包含
@@ -270,7 +270,7 @@ qa_v03_menu_open_before_esc.png / qa_v03_menu_after_esc_hover.png
 **测试数据清理**：
 
 - 本轮**未向项目目录（`docs/` / `prototype/` / `qa/`）写入任何数据**——`pretest_` 前缀输入仅存在于浏览器页面内存，未落盘、无残留。
-- 全部脚本、截图、JSON 结果位于系统临时目录 `C:\Users\yang6\AppData\Local\Temp\minipi_qa\`，并在 `%TEMP%\minipi_qa_prof_qa_*`、`minipi_qa_prof_layout_*`、`minipi_qa_prof_fix_*`、`minipi_qa_prof_rail_*`、`minipi_qa_prof_stale_*`、`minipi_qa_prof_final_*` 下残留临时 Chrome profile（未清理，可由主理人知情后删除；未触及项目目录）。
+- 全部脚本、截图、JSON 结果位于系统临时目录 `%TEMP%\minipi_qa\`，并在 `%TEMP%\minipi_qa_prof_qa_*`、`minipi_qa_prof_layout_*`、`minipi_qa_prof_fix_*`、`minipi_qa_prof_rail_*`、`minipi_qa_prof_stale_*`、`minipi_qa_prof_final_*` 下残留临时 Chrome profile（未清理，可由主理人知情后删除；未触及项目目录）。
 - 本轮**未新增、未修改项目内任何文件**；本报告独立存放在临时目录（见下），如需归档到 `qa/` 目录请告知——因任务书要求「`qa/` 不要动」，我未擅自写入。
 
 **项目目录现状（实测，未被本轮改动）**：
@@ -294,4 +294,4 @@ prototype/minipi-prototype.html | 117955B | 2215 行 | sha256=239ab1383596479d�
   └─ 会话结束读取（qa_v03_finalcheck.js）：size=117955, sha256=239ab1383596479d…
 ```
 
-**本报告路径**：`C:\Users\yang6\AppData\Local\Temp\minipi_qa\minipi-v03-regression-report.md`
+**本报告路径**：`%TEMP%\minipi_qa\minipi-v03-regression-report.md`

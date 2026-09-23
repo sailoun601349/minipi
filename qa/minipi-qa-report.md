@@ -20,7 +20,7 @@
 
 **测试脚本与原始证据**（未写入项目目录）：
 ```
-C:\Users\yang6\AppData\Local\Temp\minipi_qa\
+%TEMP%\minipi_qa\
 ├─ cdp.js / page.js              # 自建 CDP 驱动（真实鼠标·键盘·遮挡校验）
 ├─ run_load.js                   # 加载与控制台报错采集
 ├─ run_interactions.js           # 64 项交互用例
@@ -583,7 +583,7 @@ C:\Users\yang6\AppData\Local\Temp\minipi_qa\
 |---|---|
 | 真实 API key / 凭证 | **0**（`sk-` / `ghp_` / `AKIA` / `AIza` / `xox[baprs]-` 均无匹配） |
 | 真实邮箱 | **0** |
-| 真实用户名 / 本机绝对路径 | **0**（`C:\Users\…`、`/Users/…`、`/home/…` 均无匹配；`yang6`、`SAiProject` 均未出现） |
+| 真实用户名 / 本机绝对路径 | **0**（`C:\Users\…`、`/Users/…`、`/home/…` 均无匹配；本机用户名与项目所在盘符路径均未出现，临时目录一律记作 `%TEMP%`） |
 | 绝对路径 | 全部为虚构示例 `D:\proj\demo\...`（18 处）与 `~/minipi/...` |
 | IP 地址 | **0** |
 | 域名 | 仅 `example.invalid`（**RFC 2606 保留 TLD，保证不可解析**）→ 安全 |
@@ -706,7 +706,7 @@ C:\Users\yang6\AppData\Local\Temp\minipi_qa\
 ## 【测试数据清理】
 
 - 本次测试**未向项目目录写入任何数据**；`pretest_` 前缀输入仅存在于浏览器页面内存，未落盘、无残留。
-- 全部测试产物位于系统临时目录 `C:\Users\yang6\AppData\Local\Temp\minipi_qa\`（脚本 / 截图 / JSON 结果 / 解包的 SDK），**不在项目内**，可由主理人自行知情后删除。
+- 全部测试产物位于系统临时目录 `%TEMP%\minipi_qa\`（脚本 / 截图 / JSON 结果 / 解包的 SDK），**不在项目内**，可由主理人自行知情后删除。
 - 临时 Chrome profile 目录：`%TEMP%\minipi_qa_profile*`、`%TEMP%\minipi_qa_prof2_*`、`%TEMP%\minipi_qa_prof3_*`、`%TEMP%\minipi_qa_prof4_*`。
 - 唯一的项目内新增文件是**本报告** `D:\SAiProject\minipi\qa\minipi-qa-report.md`。
 
