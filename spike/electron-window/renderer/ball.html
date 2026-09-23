@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>minipi spike · 透明球窗内容</title>
+<style>
+  /* 关键：页面自身必须透明，四角不能有任何绘制，否则「角像素 alpha=0」判据没有意义 */
+  html, body { margin: 0; padding: 0; height: 100%; width: 100%; background: transparent; overflow: hidden; }
+  body { font: 12px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; color: #dfe7ef; }
+
+  /* 48×48 球：贴左上，留 2px 边，保证四角一定是透明的 */
+  .ball {
+    position: absolute; left: 2px; top: 2px; width: 44px; height: 44px; border-radius: 50%;
+    display: grid; place-items: center; font-size: 17px; font-weight: 800; color: #cfe3ff;
+    background: radial-gradient(circle at 32% 28%, #2a3542, #12171d 72%);
+    border: 1px solid #43505f;
+    box-sizing: border-box;
+  }
+
+  /* 放大后（Mini 360×480 / Full 960×680）露出一个自绘卡片，四边留 8px，
+     同样保证四角透明 —— 这一层可以直观看出「窗口透明 + 内容是自绘的」 */
+  .card { display: none; }
+  @media (min-width: 200px) {
+    .card {
+      display: block; position: absolute; inset: 8px; box-sizing: border-box;
+      border: 1px solid #46545f; border-radius: 12px;
+      background: rgba(18, 24, 31, .96);
+      padding: 10px 12px; overflow: hidden;
+    }
+    .card h1 { font-size: 12px; margin: 0 0 6px; color: #e6edf3; -webkit-app-region: drag; }
+    .card p { margin: 0 0 6px; color: #b9c5d1; }
+    .card code { color: #9cc7ff; }
+    .card .meta { color: #8b949e; font-size: 11px; }
+    .size { color: #3fb950; font-weight: 700; }
+  }
+</style>
+</head>
+<body>
+  <div class="ball" aria-hidden="true">π</div>
+  <div class="card">
+    <h1>minipi · 自绘标题栏（拖这里移动窗口）</h1>
+    <p>这是一个 <b>frameless + transparent + alwaysOnTop</b> 的窗口，正在被 spike 脚本反复 <code>setBounds</code>。</p>
+    <p>当前尺寸：<span class="size" id="size">—</span></p>
+    <p class="meta">四角像素必须保持 alpha = 0（透明）；卡片四边留 8px 就是为了让四角始终空着。</p>
+    <p class="meta">截图里如果四角变成了不透明的深色块，说明透明在本次变形中掉了。</p>
+  </div>
+  <script>
+    (function () {
+      function paint() {
+        var el = document.getElementById('size');
+        if (el) el.textContent = window.innerWidth + ' × ' + window.innerHeight + '  (dpr ' + window.devicePixelRatio + ')';
+      }
+      window.addEventListener('resize', paint);
+      paint();
+    })();
+  </script>
+</body>
+</html>

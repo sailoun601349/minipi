@@ -1,0 +1,38 @@
+{
+  "name": "minipi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "minipi · 常驻桌面的 Pi 悬浮球（Electron 宿主层 + Pi SDK 接线；M0 + M1 核心）",
+  "type": "module",
+  "main": "src/main/index.js",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "config": {
+    "electron_mirror": "https://npmmirror.com/mirrors/electron/"
+  },
+  "scripts": {
+    "start": "node scripts/start.mjs",
+    "selftest": "node scripts/start.mjs --selftest",
+    "selftest:soft": "node scripts/start.mjs --selftest --disable-gpu",
+    "verify:stream": "node scripts/verify-stream.mjs",
+    "verify:electron": "node scripts/check-electron.mjs",
+    "verify:v04": "node scripts/verify-v04.mjs",
+    "verify:scene": "node scripts/check-scene-consistency.mjs",
+    "verify:sandbox": "node scripts/verify-sandbox.mjs",
+    "verify:sandbox:live": "node scripts/verify-sandbox-live.mjs",
+    "verify:approval": "node scripts/verify-approval.mjs",
+    "verify:approval-ui": "node scripts/qa-approval-ui.mjs",
+    "verify:outcome": "node scripts/verify-outcome.mjs",
+    "verify:all": "node scripts/verify-all.mjs",
+    "verify:live": "node scripts/verify-sandbox-live.mjs",
+    "postinstall": "node scripts/check-electron.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "docx": "9.7.1"
+  },
+  "devDependencies": {
+    "electron": "44.4.3"
+  }
+}

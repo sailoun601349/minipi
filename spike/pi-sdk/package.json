@@ -1,0 +1,19 @@
+{
+  "name": "minipi-spike-pi-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "minipi 开工门禁序 7 · Pi SDK 运行时行为 spike：offline（不调模型）真实跑掉 + live（需凭证，默认不执行）",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "spike:offline": "node src/offline.mjs",
+    "spike:live": "node src/live.mjs",
+    "spike:live:plan": "node src/live.mjs --plan",
+    "selfcheck": "node src/selfcheck.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.0"
+  }
+}

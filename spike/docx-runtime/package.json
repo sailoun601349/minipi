@@ -1,0 +1,1 @@
+{ "name": "minipi-docx-runtime-probe", "version": "1.0.0", "type": "module", "main": "probe-main.mjs" }

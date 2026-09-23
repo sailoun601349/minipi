@@ -1,0 +1,20 @@
+{
+  "name": "minipi-spike-electron-window",
+  "version": "0.1.0",
+  "private": true,
+  "description": "minipi 开工门禁序 7 · Electron 透明窗口 spike：4 项实测 + JSON 报告 + 截图",
+  "type": "module",
+  "main": "main.mjs",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "electron .",
+    "spike": "electron . --out out",
+    "check": "node scripts/selfcheck.mjs",
+    "check:online": "node scripts/selfcheck.mjs --online"
+  },
+  "devDependencies": {
+    "electron": "44.4.3"
+  }
+}

@@ -1,0 +1,59 @@
+# minipi · Git 排除规则
+#
+# 原则：只收录「第一方源码 + 文档 + 验证脚本」，
+#      依赖、构建产物、第三方源码快照、任何含密钥的文件一律不入库。
+
+# ── 依赖 ──────────────────────────────────────────
+node_modules/
+.pnpm-store/
+
+# ── 构建产物 ──────────────────────────────────────
+dist/
+build/
+out/
+*.exe
+*.dll
+*.node
+*.asar
+
+# spike/ 是技术验证工程：只留源码与结论，不留依赖与产物
+spike/*/node_modules/
+spike/*/out/
+spike/*/dist/
+
+# ── 第三方源码快照（非运行时依赖）──────────────────
+# vendor/pi 是上游 Pi SDK（MIT, Mario Zechner）的源码快照，
+# 仅用于开发期核对 SDK 行为（src/ 中的 "vendor 确证" 注释），
+# 运行时依赖走 npm 包 @earendil-works/pi-coding-agent。
+# 仓库不收录该快照（约 59MB），如需核对请从上游获取。
+vendor/
+
+# ── 本地环境与密钥（绝不入库）─────────────────────
+# minipi 自身不存储任何模型 key：
+#   Pi 的模型凭据 ~/.pi/agent/auth.json、Jev 凭据等均在**家目录**，
+#   位于本仓库范围之外。以下规则是纵深防御，防止日后误放。
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+auth.json
+credentials.json
+credentials.yaml
+secrets.*
+
+# ── 本机工作区与个人数据 ──────────────────────────
+.workbuddy/
+qa/shots/
+qa/_*.txt
+package-lock.json.bak
+
+# ── 系统噪声 ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+npm-debug.log*
+*.swp

@@ -1,0 +1,2451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>minipi 交互原型 v0.5 · 球 / 小窗 / 大窗 / 审批闸门</title>
+<style>
+/* ============================================================
+   minipi 交互原型 —— 单文件，无外部依赖，双击即可打开
+   对齐：docs/minipi-plan.md v0.3（含 D-01~D-11 拍板结论）
+   §3.2 场景表 · §3.3 审批闸门（pi.on("tool_call")）· §4 形态机
+   §4.2 宿主细节 · §5 长任务七级状态
+   ------------------------------------------------------------
+   v0.5 相对 v0.4 只做「与拍板结论对齐」，不动信息架构与视觉方向：
+     ① D-09/D-10/D-11 → 本期不做（文案由「尚未实现」改为「本期不做（已拍板）」）
+     ② D-02 焦点归还只到窗口级，caret 恢复为 best-effort
+     ③ D-01 默认抢焦点，判据为「不把原 App 切到后台」
+     ④ D-05 审批卡动作固定「允许一次 / 拒绝 / 中断整轮」
+     ⑤ D-06 bash 审批卡补「命令级边界」说明
+     ⑥ §4.1 大窗 = 全形态 frameless + 自绘标题栏（含 Windows 透明窗限制）
+     ⑦ §5 七级口径同步 + 真的实现「等审批暂停计时」「本轮手动收起过则不再升级」
+     ⑧ §3.3 闸门改为官方 pi.on("tool_call") 前置钩子；ctx.ui → bridge WS 审批推送
+   ============================================================ */
+
+:root{
+  --bg:#0b0f14; --bg-2:#0e131a;
+  --surface:#151b23; --surface-2:#1b232d; --surface-3:#222c38;
+  --border:#2c3742; --border-strong:#3d4b59;
+  --text:#e6edf3; --text-2:#b9c5d1; --muted:#8b949e;
+  --accent:#4c9aff; --accent-2:#1f6feb;
+  --danger:#f85149; --success:#3fb950; --warn:#e3b341; --violet:#a371f7;
+  --radius:10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+
+*,*::before,*::after{ box-sizing:border-box; }
+html,body{ height:100%; }
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:var(--sans); font-size:13px; line-height:1.55;
+  -webkit-font-smoothing:antialiased; overflow:hidden;
+}
+button,input,textarea,select{ font:inherit; color:inherit; }
+button{ background:none; border:0; cursor:pointer; }
+ul,ol{ margin:0; padding:0; list-style:none; }
+h1,h2,h3,h4,p,figure{ margin:0; }
+code,kbd,pre{ font-family:var(--mono); }
+
+:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; }
+
+.sr-only{
+  position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+  overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0;
+}
+[hidden]{ display:none !important; }
+
+@media (prefers-reduced-motion: reduce){
+  *{ animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+}
+
+@keyframes spin{ to{ transform:rotate(360deg); } }
+@keyframes blink{ 50%{ opacity:0; } }
+@keyframes pulseDot{ 0%,100%{ opacity:.32; transform:translateY(0); } 40%{ opacity:1; transform:translateY(-2px); } }
+@keyframes pulseYellow{ 0%,100%{ box-shadow:0 0 0 0 rgba(227,179,65,.55); } 60%{ box-shadow:0 0 0 7px rgba(227,179,65,0); } }
+@keyframes slideUp{ from{ opacity:0; transform:translate(-50%,12px); } to{ opacity:1; transform:translate(-50%,0); } }
+@keyframes notifyIn{ from{ opacity:0; transform:translateY(10px); } to{ opacity:1; transform:translateY(0); } }
+
+/* ---------------- 骨架 ---------------- */
+.app{ display:flex; height:100vh; min-height:0; }
+
+/* ---------------- 左侧原型控制台 ---------------- */
+.rail{
+  width:274px; flex-shrink:0; min-height:0; display:flex; flex-direction:column;
+  background:var(--bg-2); border-right:1px solid var(--border);
+}
+.rail__head{ padding:10px 12px 8px; border-bottom:1px solid var(--border); flex-shrink:0; }
+.rail__title{ font-size:13px; font-weight:700; letter-spacing:.2px; margin:0; }
+.rail__sub{ font-size:10.5px; color:var(--muted); margin-top:2px; }
+/* P3-2：压缩间距，7 组尽量一屏可见 */
+/* P3-2：压缩间距，配合可折叠分组，让 7 组在 1280×800 下一屏内可见、可点 */
+/* P3-N1：分组间距再收 1px，配合 ② 组默认折叠，1366×768 与 1280×720 均无纵向滚动 */
+.rail__body{ flex:1; min-height:0; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:4px; font-size:11px; }
+
+.ctl{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:6px 8px; }
+.ctl__h{ font-size:11.5px; font-weight:700; color:var(--text-2); display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+.ctl__h .ctl__t{ margin:0; font-size:11.5px; font-weight:700; color:var(--text-2); letter-spacing:inherit; }
+.ctl__h .tag{ margin-left:auto; }
+.hint{ font-size:10.5px; color:var(--muted); margin-top:4px; line-height:1.42; word-break:break-word; }
+.rail .btn{ padding:5px 8px; font-size:11px; }
+.rail .btn--sm{ padding:4px 7px; font-size:10.5px; }
+.rail .btnrow{ gap:5px; }
+.rail .btnrow--cols, .rail .btnrow--stack{ gap:5px; }
+
+/* 可折叠分组（P3-2） */
+details.ctl > summary{ list-style:none; cursor:pointer; margin-bottom:0; }
+details.ctl > summary::-webkit-details-marker{ display:none; }
+details.ctl > summary::before{ content:'▸'; flex-shrink:0; font-size:10px; color:var(--muted); }
+details.ctl[open] > summary::before{ content:'▾'; }
+details.ctl[open] > summary{ margin-bottom:6px; }
+.ctl__body{ display:block; }
+
+.tag{
+  font-size:10px; padding:1px 6px; border-radius:999px; white-space:nowrap;
+  background:rgba(76,154,255,.14); color:#9cc7ff; border:1px solid rgba(76,154,255,.34);
+}
+
+/* ---------------- 通用按钮 ---------------- */
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+  padding:6px 10px; border-radius:8px; font-size:12px; line-height:1.2;
+  border:1px solid var(--border-strong); background:var(--surface-2); color:var(--text-2);
+  transition:background .14s, border-color .14s, color .14s, transform .1s;
+  white-space:nowrap;
+}
+.btn:hover{ background:var(--surface-3); color:var(--text); border-color:#4d5d6d; }
+.btn:active{ transform:translateY(1px); }
+.btn--sm{ padding:4px 8px; font-size:11.5px; }
+.btn--block{ width:100%; }
+.btn--primary{ background:var(--accent-2); border-color:#3b82f6; color:#fff; }
+.btn--primary:hover{ background:#2b7ef0; border-color:#60a5fa; color:#fff; }
+.btn--danger{ background:rgba(248,81,73,.14); border-color:rgba(248,81,73,.5); color:#ff9d96; }
+.btn--danger:hover{ background:rgba(248,81,73,.24); border-color:var(--danger); color:#ffd0cc; }
+.btn--ghost{ background:transparent; border-color:var(--border); }
+.btn--ghost:hover{ background:var(--surface-2); }
+.btn--warn{ background:rgba(227,179,65,.18); border-color:rgba(227,179,65,.6); color:#f2cf70; }
+.btn--warn:hover{ background:rgba(227,179,65,.3); color:#ffe6a3; }
+.btn[aria-pressed="true"]{ background:rgba(76,154,255,.18); border-color:var(--accent); color:#cfe3ff; }
+
+.btnrow{ display:flex; flex-wrap:wrap; gap:6px; }
+.btnrow--cols{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.btnrow--stack{ display:grid; grid-template-columns:1fr; gap:6px; }
+
+.ballpick{ display:grid; grid-template-columns:1fr 1fr; gap:5px; }
+.ballpick__item{
+  display:flex; align-items:center; gap:6px; padding:5px 7px; min-width:0;
+  border:1px solid var(--border); border-radius:8px; background:var(--surface-2);
+  color:var(--text-2); font-size:11px; text-align:left;
+  transition:border-color .14s, background .14s, color .14s;
+}
+.ballpick__item:hover{ background:var(--surface-3); color:var(--text); }
+.ballpick__item[aria-pressed="true"]{ border-color:var(--accent); background:rgba(76,154,255,.14); color:#cfe3ff; }
+.ballpick__item > span:last-child{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.bdot{
+  position:relative; flex-shrink:0; width:22px; height:22px; border-radius:50%;
+  display:grid; place-items:center; font-size:10px; font-weight:800; color:#cfe3ff;
+  background:radial-gradient(circle at 32% 28%, #2a3542, #12171d 70%); border:1px solid #3f4c5a;
+}
+.bdot--thinking::after{
+  content:''; position:absolute; inset:-3px; border-radius:50%;
+  border:2px solid transparent; border-top-color:var(--accent); border-right-color:rgba(76,154,255,.3);
+  animation:spin 1s linear infinite;
+}
+.bdot--unread::after{
+  content:''; position:absolute; right:-2px; top:-2px; width:8px; height:8px; border-radius:50%;
+  background:var(--danger); border:1.5px solid var(--bg-2);
+}
+.bdot--await{ background:radial-gradient(circle at 32% 28%, #7a5c10, #3a2c05 70%); border-color:var(--warn); color:#ffe6a3; }
+.bdot--await::after{
+  content:''; position:absolute; right:-3px; top:-3px; width:10px; height:10px; border-radius:50%;
+  background:var(--warn); border:1.5px solid var(--bg-2); animation:pulseYellow 1.4s ease-in-out infinite;
+}
+
+.scenetable{ margin-top:6px; border-top:1px dashed var(--border); padding-top:6px; display:grid; gap:3px; }
+.scenerow{ display:grid; grid-template-columns:46px 1fr; gap:6px; font-size:10.5px; min-width:0; }
+.scenerow dt{ color:var(--muted); }
+.scenerow dd{ margin:0; color:var(--text-2); word-break:break-word; min-width:0; }
+.scenerow dd code{ color:#9cc7ff; }
+.scenenote{ font-size:10.5px; color:var(--muted); margin-top:4px; line-height:1.42; word-break:break-word; }
+.scenenote b{ color:var(--text-2); }
+.actlog{
+  margin-top:6px; font-size:10.5px; color:#f2cf70; background:rgba(227,179,65,.1);
+  border:1px solid rgba(227,179,65,.3); border-radius:6px; padding:6px 8px;
+  line-height:1.5; word-break:break-word;
+}
+
+/* ---------------- 桌面舞台 ---------------- */
+.stage{
+  flex:1; min-width:0; min-height:0; display:flex; flex-direction:column;
+  background:radial-gradient(1100px 620px at 26% -10%, #16202b 0%, #0a0e13 62%);
+}
+.desktop-wrap{ flex:1; min-height:0; overflow:auto; padding:18px; }
+.desktop{ position:relative; width:1140px; height:780px; margin:0 auto; }
+
+/* ---------------- 背景：假 PDF 阅读器 ---------------- */
+.pdfwin{
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  background:linear-gradient(180deg,#1b2129,#161b22);
+  border:1px solid #333c47; border-radius:9px; overflow:hidden;
+  box-shadow:0 26px 64px rgba(0,0,0,.55);
+}
+.pdfwin__bar{
+  flex-shrink:0; height:36px; display:flex; align-items:center; gap:7px;
+  padding:0 12px; background:#222a33; border-bottom:1px solid #333c47;
+}
+.win__dot{ width:10px; height:10px; border-radius:50%; background:#4a545f; flex-shrink:0; }
+.win__dot--r{ background:#e5695f; } .win__dot--y{ background:#e0b34c; } .win__dot--g{ background:#5ebd63; }
+.pdfwin__title{
+  font-size:12px; color:#c3ccd6; margin-left:6px; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* P3-3：辅助文字对比度一律 ≥ 4.5:1（深色主题 #8b949e 为下限） */
+.pdfwin__meta{ margin-left:auto; font-size:11px; color:#8b949e; flex-shrink:0; }
+.pdfwin__tools{
+  flex-shrink:0; height:32px; display:flex; align-items:center; gap:9px; padding:0 12px;
+  background:#1d242c; border-bottom:1px solid #2b333c; font-size:11px; color:#8b949e;
+}
+.pdfwin__tool{ padding:2px 7px; border-radius:5px; border:1px solid #333c47; color:#8f9aa6; }
+.pdfwin__page{
+  position:absolute; left:430px; right:44px; top:106px; bottom:52px;
+  padding:26px 30px; overflow:hidden;
+  background:#171d24; border:1px solid #2b333c; border-radius:6px;
+  box-shadow:inset 0 0 60px rgba(0,0,0,.35);
+}
+.pdfwin__page h3{ font-size:14px; color:#dbe3ec; margin-bottom:12px; font-weight:600; }
+.pdfwin__page p{ font-size:13px; line-height:2; color:#c0cad6; margin-bottom:14px; word-break:break-word; }
+.pdfwin__page em{ color:#e6edf3; font-style:italic; }
+.pdfwin__page sub{ font-size:10px; }
+.sel{ background:rgba(76,154,255,.30); color:#eaf3ff; border-radius:2px; box-shadow:0 0 0 1px rgba(76,154,255,.42); }
+.pdfwin__foot{
+  position:absolute; left:430px; right:44px; bottom:18px; font-size:11px; color:#8b949e;
+  display:flex; justify-content:space-between; gap:12px;
+}
+.pdfwin__foot > span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+
+.legend{
+  position:absolute; left:28px; bottom:12px; z-index:5;
+  display:flex; gap:7px; flex-wrap:wrap; max-width:640px; font-size:10.5px; color:var(--muted);
+}
+.legend span{
+  background:rgba(11,15,20,.72); border:1px solid var(--border); border-radius:999px;
+  padding:2px 9px; backdrop-filter:blur(4px);
+}
+.legend b{ color:var(--text-2); font-weight:600; }
+
+/* ---------------- ① 悬浮球 ---------------- */
+.ballwrap{ position:absolute; left:420px; top:600px; z-index:60; width:48px; height:48px; }
+.ball{
+  position:relative; width:48px; height:48px; border-radius:50%;
+  display:grid; place-items:center; padding:0;
+  background:radial-gradient(circle at 32% 28%, #2a3542, #12171d 72%);
+  border:1px solid #43505f;
+  box-shadow:0 0 0 1px rgba(255,255,255,.05) inset, 0 12px 28px rgba(0,0,0,.6), 0 0 20px rgba(76,154,255,.2);
+  transition:transform .15s ease, box-shadow .2s, background .2s, border-color .2s;
+  cursor:grab;
+}
+.ball:hover{ transform:scale(1.06); box-shadow:0 0 0 1px rgba(255,255,255,.06) inset, 0 14px 32px rgba(0,0,0,.65), 0 0 26px rgba(76,154,255,.38); }
+.ball:active{ transform:scale(.95); cursor:grabbing; }
+.ball__glyph{ font-size:17px; font-weight:800; color:#cfe3ff; line-height:1; }
+.ball__badge{ position:absolute; display:none; }
+
+.ballwrap[data-ball="thinking"] .ball::after{
+  content:''; position:absolute; inset:-5px; border-radius:50%;
+  border:2px solid transparent; border-top-color:var(--accent); border-right-color:rgba(76,154,255,.3);
+  animation:spin 1s linear infinite;
+}
+.ballwrap[data-ball="unread"] .ball__badge{
+  display:block; position:absolute; right:-2px; top:-2px; width:13px; height:13px; border-radius:50%;
+  background:var(--danger); border:2px solid #0b0f14;
+}
+.ballwrap[data-ball="await"] .ball{
+  background:radial-gradient(circle at 32% 28%, #866619, #3d2f06 72%);
+  border-color:var(--warn);
+  box-shadow:0 0 0 1px rgba(227,179,65,.4) inset, 0 12px 28px rgba(0,0,0,.6), 0 0 26px rgba(227,179,65,.5);
+}
+.ballwrap[data-ball="await"] .ball::after{
+  content:'!'; position:absolute; right:-6px; top:-6px; width:19px; height:19px; border-radius:50%;
+  background:var(--warn); color:#2a1f00; font-weight:900; font-size:12px;
+  display:grid; place-items:center; border:2px solid #0b0f14;
+  animation:pulseYellow 1.4s ease-in-out infinite;
+}
+.ball__caption{
+  position:absolute; left:50%; top:52px; transform:translateX(-50%);
+  font-size:10.5px; color:var(--text-2); white-space:nowrap;
+  background:rgba(11,15,20,.85); border:1px solid var(--border);
+  border-radius:999px; padding:1px 8px;
+}
+.ballmenu{
+  position:absolute; left:58px; top:-4px; width:194px; display:none;
+  background:var(--surface); border:1px solid var(--border-strong); border-radius:9px;
+  box-shadow:0 18px 44px rgba(0,0,0,.66); padding:5px; z-index:70;
+}
+.ballwrap:hover .ballmenu,
+.ballwrap:focus-within .ballmenu{ display:block; }
+/* P2-2：右键真实打开菜单（JS 加 data-open），不再只靠 :hover */
+.ballmenu[data-open="true"]{ display:block; }
+/* P2-N2：显式关闭（Esc / 点击空白）优先于 hover/focus —— JS 给 .ballwrap 加 data-menu="closed"，
+   用更高优先级把菜单压掉，直到鼠标离开球（mouseleave 移除该标记）才恢复悬停行为。
+   选择器 (0,4,0) 高于 .ballwrap:hover .ballmenu (0,3,0)，故不受源码顺序影响。 */
+.ballwrap[data-menu="closed"] .ballmenu,
+.ballwrap[data-menu="closed"]:hover .ballmenu,
+.ballwrap[data-menu="closed"]:focus-within .ballmenu{ display:none; }
+.ballmenu__item{ display:block; width:100%; text-align:left; padding:6px 9px; border-radius:6px; font-size:12px; color:var(--text-2); }
+.ballmenu__item:hover{ background:var(--surface-3); color:var(--text); }
+.ballmenu__hint{
+  font-size:10.5px; color:var(--muted); padding:5px 9px 3px; border-top:1px solid var(--border);
+  margin-top:4px; line-height:1.45;
+}
+
+/* ---------------- ② 小窗 360×480 ---------------- */
+.mini{
+  position:absolute; left:28px; top:48px; width:360px; height:480px; z-index:50;
+  display:flex; flex-direction:column; min-height:0;
+  background:rgba(18,24,31,.96); border:1px solid #46545f; border-radius:14px;
+  box-shadow:0 30px 70px rgba(0,0,0,.72), 0 0 0 1px rgba(140,180,230,.14), 0 0 48px rgba(76,154,255,.16);
+  backdrop-filter:blur(10px); overflow:hidden;
+}
+.mini__head{
+  flex-shrink:0; height:36px; display:flex; align-items:center; gap:8px; padding:0 10px;
+  background:rgba(34,44,56,.75); border-bottom:1px solid var(--border);
+}
+.mini__title{ font-size:12px; font-weight:600; color:var(--text); flex-shrink:0; }
+.mini__scene{
+  font-size:10px; padding:1px 7px; border-radius:999px; color:#9cc7ff; flex-shrink:0;
+  background:rgba(76,154,255,.14); border:1px solid rgba(76,154,255,.34);
+}
+.mini__drag{ flex:1; min-width:0; }
+.mini__dragHint{
+  font-size:10px; color:var(--muted); min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+.banner{
+  flex-shrink:0; display:flex; align-items:center; gap:8px; padding:7px 10px;
+  background:linear-gradient(90deg, rgba(227,179,65,.26), rgba(227,179,65,.12));
+  border-bottom:1px solid rgba(227,179,65,.5);
+}
+.banner__text{
+  font-size:12px; font-weight:700; color:#ffe6a3; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.banner .btn{ margin-left:auto; flex-shrink:0; }
+
+.mini__body{ flex:1; min-height:0; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+
+.msg{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.msg--user{ align-items:flex-end; }
+.msg--pi{ align-items:flex-start; }
+.bubble{
+  max-width:86%; padding:7px 10px; border-radius:11px; font-size:12.5px; line-height:1.6;
+  word-break:break-word;
+}
+.msg--user .bubble{ background:rgba(76,154,255,.2); border:1px solid rgba(76,154,255,.42); color:#e8f1ff; border-bottom-right-radius:3px; }
+.pihead{ display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); }
+.piavatar{
+  width:17px; height:17px; border-radius:50%; flex-shrink:0; display:grid; place-items:center;
+  background:rgba(76,154,255,.18); border:1px solid rgba(76,154,255,.4); color:#9cc7ff;
+  font-size:10px; font-weight:800;
+}
+.pibody{
+  max-width:92%; min-width:0; padding:8px 10px; border-radius:11px;
+  background:var(--surface); border:1px solid var(--border);
+  color:var(--text-2); font-size:12.5px; line-height:1.68; border-bottom-left-radius:3px;
+  word-break:break-word;
+}
+.pibody p{ margin:0 0 8px; }
+.pibody p:last-child{ margin-bottom:0; }
+.pibody strong{ color:var(--text); }
+.pibody code{ color:#9cc7ff; }
+
+.pulse{ display:flex; align-items:center; gap:5px; }
+.pulse span{ width:7px; height:7px; border-radius:50%; background:var(--accent); animation:pulseDot 1.1s ease-in-out infinite; }
+.pulse span:nth-child(2){ animation-delay:.18s; }
+.pulse span:nth-child(3){ animation-delay:.36s; }
+.pulsetext{ font-size:11.5px; color:var(--muted); margin-top:6px; }
+.caret{ display:inline-block; width:7px; height:13px; background:var(--accent); vertical-align:-2px; animation:blink 1s steps(2,start) infinite; }
+
+.tooline{
+  display:flex; align-items:center; gap:7px; width:100%; text-align:left;
+  padding:6px 9px; border-radius:8px; font-size:11.5px;
+  background:var(--surface-2); border:1px solid var(--border); color:var(--text-2);
+  transition:border-color .14s, background .14s;
+}
+.tooline:hover{ background:var(--surface-3); border-color:var(--border-strong); }
+.tooline code{ color:#9cc7ff; }
+.tooline__path{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1; }
+.tooline__chev{ flex-shrink:0; font-size:10.5px; color:var(--muted); }
+.gear{ flex-shrink:0; display:inline-block; animation:spin 1.6s linear infinite; }
+.toolDetail{
+  margin-top:6px; padding:8px 10px; border-radius:8px; background:#10161d;
+  border:1px dashed var(--border-strong); font-size:11px; color:var(--muted); line-height:1.6;
+  word-break:break-word;
+}
+.toolDetail code{ color:#9cc7ff; }
+
+.mini__foot{
+  flex-shrink:0; border-top:1px solid var(--border); background:rgba(34,44,56,.6);
+  padding:8px 10px 9px; display:flex; flex-direction:column; gap:6px;
+}
+.mini__input{
+  width:100%; resize:none; border-radius:9px; padding:8px 10px; font-size:12.5px; line-height:1.5;
+  background:var(--surface); border:1px solid var(--border-strong); color:var(--text);
+}
+.mini__input::placeholder{ color:#8b949e; opacity:1; }
+.mini__input:focus{ border-color:var(--accent); outline-offset:0; }
+.mini__footmeta{ display:flex; align-items:center; gap:8px; min-width:0; }
+.kbd-hint{ font-size:10.5px; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); background:var(--surface-3); border:1px solid var(--border-strong); }
+.mini__footrow{ display:flex; align-items:center; gap:6px; }
+.mini__footrow .btn:last-child{ margin-left:auto; }
+.mini__note{
+  font-size:10.5px; color:var(--muted); line-height:1.5; word-break:break-word;
+}
+
+/* ---------------- ③ 大窗 960×680 ---------------- */
+.full{
+  position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  width:960px; height:680px; z-index:40;
+  display:flex; flex-direction:column; min-height:0;
+  background:var(--surface); border:1px solid var(--border-strong); border-radius:12px;
+  box-shadow:0 24px 54px rgba(0,0,0,.6); overflow:hidden;
+}
+.full__head{
+  flex-shrink:0; height:40px; display:flex; align-items:center; gap:9px; padding:0 12px;
+  background:var(--surface-2); border-bottom:1px solid var(--border);
+}
+.full__title{ font-size:12.5px; font-weight:700; flex-shrink:0; }
+.full__sub{ font-size:11px; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.full__head .btn{ margin-left:auto; flex-shrink:0; }
+.full__body{ flex:1; min-height:0; display:flex; }
+
+.full__col{ min-height:0; display:flex; flex-direction:column; }
+.full__col--sessions{ width:206px; flex-shrink:0; border-right:1px solid var(--border); background:var(--bg-2); }
+.full__col--tree{ flex:1; min-width:0; }
+.full__col--side{ width:212px; flex-shrink:0; border-left:1px solid var(--border); background:var(--bg-2); }
+.col__head{
+  flex-shrink:0; padding:9px 11px; font-size:11px; font-weight:700; color:var(--muted);
+  border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px;
+}
+.col__head .tag{ margin-left:auto; }
+.col__scroll{ flex:1; min-height:0; overflow-y:auto; padding:8px; }
+
+.sess{
+  display:block; width:100%; text-align:left; padding:7px 8px; border-radius:8px;
+  border:1px solid transparent; color:var(--text-2); margin-bottom:4px;
+}
+.sess:hover{ background:var(--surface-2); }
+.sess[aria-pressed="true"]{ background:rgba(76,154,255,.13); border-color:rgba(76,154,255,.45); }
+.sess__t{ font-size:12px; color:var(--text); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sess__m{ display:flex; align-items:center; gap:6px; margin-top:3px; font-size:10.5px; color:var(--muted); min-width:0; }
+.sess__m span:last-child{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chip{
+  font-size:10px; padding:1px 6px; border-radius:999px; white-space:nowrap; flex-shrink:0;
+  border:1px solid var(--border-strong); background:var(--surface-3); color:var(--text-2);
+}
+.chip--speed{ background:rgba(76,154,255,.14); border-color:rgba(76,154,255,.4); color:#9cc7ff; }
+.chip--study{ background:rgba(163,113,247,.16); border-color:rgba(163,113,247,.42); color:#cbb2ff; }
+.chip--work{ background:rgba(63,185,80,.14); border-color:rgba(63,185,80,.42); color:#8fdda0; }
+.chip--tool{ background:rgba(227,179,65,.14); border-color:rgba(227,179,65,.45); color:#f2cf70; font-family:var(--mono); }
+.chip--cwd{ font-family:var(--mono); color:var(--muted); max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+
+.tree{ display:flex; flex-direction:column; gap:10px; }
+.seg{ min-width:0; }
+.seg__label{ font-size:10.5px; color:var(--muted); margin-bottom:4px; display:flex; align-items:center; gap:6px; }
+.thinkbox{ border:1px solid var(--border); border-radius:9px; background:var(--bg-2); overflow:hidden; }
+.thinkbox__head{
+  display:flex; align-items:center; gap:7px; width:100%; padding:7px 10px; text-align:left;
+  font-size:11.5px; color:var(--text-2); background:transparent;
+}
+.thinkbox__head:hover{ background:var(--surface-2); }
+.thinkbox__head .chip{ margin-left:auto; }
+.thinkbox__body{
+  padding:8px 10px 9px; font-size:11.5px; color:var(--muted); line-height:1.65;
+  border-top:1px dashed var(--border); word-break:break-word;
+}
+
+.toolcard{ border:1px solid var(--border); border-radius:9px; background:var(--surface-2); overflow:hidden; }
+.toolcard__head{ display:flex; align-items:center; gap:7px; padding:7px 10px; min-width:0; border-bottom:1px solid var(--border); }
+.toolcard__path{
+  font-size:11.5px; color:var(--text-2); min-width:0; flex:1; font-family:var(--mono);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.toolcard__st{ font-size:10.5px; color:var(--success); flex-shrink:0; }
+.toolcard__body{ padding:8px 10px; font-size:11.5px; color:var(--muted); line-height:1.6; word-break:break-word; }
+.toolcard__body code{ color:#9cc7ff; }
+.toolcard--approval{ border-color:rgba(227,179,65,.5); background:transparent; }
+
+.sideblock{ padding:10px 11px; border-bottom:1px solid var(--border); }
+.sideblock__h{ font-size:10.5px; font-weight:700; color:var(--muted); margin-bottom:7px; display:flex; align-items:center; gap:6px; }
+.sideblock__h .tag{ margin-left:auto; }
+.sel-input{ width:100%; padding:5px 7px; border-radius:7px; font-size:11.5px; background:var(--surface); border:1px solid var(--border-strong); color:var(--text); }
+.segbtn{ display:flex; gap:4px; }
+.segbtn .btn{ flex:1; min-width:0; padding:4px 2px; font-size:11px; }
+.cost{ display:grid; gap:4px; font-size:11.5px; color:var(--text-2); }
+.cost__row{ display:flex; justify-content:space-between; gap:8px; min-width:0; }
+.cost__row span:first-child{ color:var(--muted); flex-shrink:0; }
+.cost__row span:last-child{ font-family:var(--mono); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cost__total{ color:#8fdda0; }
+
+/* ---------------- 审批卡 ---------------- */
+.acard{
+  border:1px solid rgba(227,179,65,.5); border-radius:11px; overflow:hidden;
+  background:linear-gradient(180deg, rgba(227,179,65,.09), rgba(21,27,35,.98) 34%, #151b23);
+  box-shadow:0 12px 30px rgba(0,0,0,.45);
+}
+.acard__head{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:9px 11px;
+  border-bottom:1px solid rgba(227,179,65,.32); background:rgba(227,179,65,.07);
+}
+.acard__title{ font-size:12.5px; font-weight:700; color:#ffe6a3; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.acard__body{ padding:11px; display:flex; flex-direction:column; gap:9px; }
+.acard__foot{
+  display:flex; align-items:center; gap:7px; flex-wrap:wrap; padding:10px 11px;
+  border-top:1px solid var(--border); background:var(--bg-2);
+}
+.acard__timer{ font-size:10.5px; color:var(--muted); margin-left:auto; }
+.acard__semantic{
+  flex-basis:100%; font-size:11px; line-height:1.55; color:#f2cf70; word-break:break-word;
+  background:rgba(227,179,65,.1); border:1px dashed rgba(227,179,65,.45);
+  border-radius:7px; padding:5px 8px;
+}
+
+.diff{ border:1px solid var(--border); border-radius:8px; overflow:auto; background:#0d1219; font-family:var(--mono); font-size:11.5px; line-height:1.65; }
+.drow{ display:grid; grid-template-columns:34px 34px 16px minmax(0, 1fr); }
+.drow > *{ padding:1px 5px; }
+.dn{ color:#8b949e; text-align:right; border-right:1px solid #1d2530; user-select:none; }
+.dsym{ text-align:center; color:#8b949e; }
+.dtext{ white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; color:#c0cad6; min-width:0; }
+.drow--add{ background:rgba(63,185,80,.13); }
+.drow--add .dsym{ color:#5fdc72; } .drow--add .dtext{ color:#b6f0c1; }
+.drow--del{ background:rgba(248,81,73,.13); }
+.drow--del .dsym{ color:#ff8b84; } .drow--del .dtext{ color:#ffc4c0; }
+.drow--hunk{ background:#151d27; }
+.drow--hunk .dtext{ color:#9cc7ff; padding:5px 6px; }
+
+.wmeta{ font-size:11.5px; color:var(--text-2); display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; }
+.wmeta b{ color:var(--text); }
+.wmeta code{ color:#9cc7ff; word-break:break-word; }
+.chip--new{ background:rgba(63,185,80,.16); border-color:rgba(63,185,80,.45); color:#8fdda0; }
+.chip--over{ background:rgba(248,81,73,.16); border-color:rgba(248,81,73,.45); color:#ff9d96; }
+
+.codeblock{ border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#0d1219; }
+.codeblock__bar{ display:flex; align-items:center; gap:8px; padding:5px 9px; background:var(--surface-2); border-bottom:1px solid var(--border); }
+.codeblock__lang{ font-size:10.5px; color:var(--muted); font-family:var(--mono); }
+.codeblock__bar .btn{ margin-left:auto; flex-shrink:0; }
+.codeblock pre{ margin:0; padding:10px; overflow-x:auto; font-size:11.5px; line-height:1.65; color:#c9d6e4; }
+.codeblock pre code{ white-space:pre-wrap; word-break:break-word; }
+
+.bcmd{ border:1px solid var(--border-strong); border-radius:8px; background:#0b1017; padding:10px; overflow-x:auto; }
+.bcmd code{ font-size:12px; line-height:1.8; color:#d6e2ef; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; }
+.bcmd .danger{ color:#ffb3ad; background:rgba(248,81,73,.22); border-radius:3px; padding:0 2px; box-shadow:0 0 0 1px rgba(248,81,73,.5); }
+.bchips{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:11px; color:var(--muted); }
+.wchip{
+  font-size:10.5px; padding:1px 7px; border-radius:999px; font-family:var(--mono);
+  background:rgba(248,81,73,.14); border:1px solid rgba(248,81,73,.45); color:#ff9d96;
+}
+.denynote{
+  font-size:11.5px; color:var(--text-2); line-height:1.7; padding:9px 11px;
+  background:rgba(76,154,255,.09); border:1px dashed rgba(76,154,255,.45); border-radius:9px;
+  word-break:break-word;
+}
+.denynote b{ color:#9cc7ff; }
+.denynote code{
+  display:block; margin-top:5px; padding:6px 8px; border-radius:6px; background:#0b1017;
+  border:1px solid var(--border); color:#b6f0c1; font-size:11px; white-space:pre-wrap; word-break:break-word;
+}
+.batch{ display:flex; flex-direction:column; gap:6px; }
+.batch__lead{ font-size:12px; color:#ffe6a3; }
+.batch__lead b{ color:#fff; }
+.batch__item{
+  display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:pointer;
+  border:1px solid var(--border); border-radius:9px; background:var(--surface-2); min-width:0;
+}
+.batch__item:hover{ background:var(--surface-3); }
+.batch__item input{ flex-shrink:0; width:15px; height:15px; accent-color:var(--accent); }
+.batch__text{ font-size:11.5px; color:var(--text-2); min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.batch__text code{ color:#9cc7ff; }
+
+/* ---------------- 审批抽屉（原型演示用，右侧浮层） ---------------- */
+.drawer{
+  position:fixed; right:16px; top:84px; width:min(620px, 46vw);
+  max-height:calc(100vh - 190px); z-index:200;
+  display:flex; flex-direction:column; min-height:0;
+  background:var(--surface); border:1px solid rgba(227,179,65,.5); border-radius:12px;
+  box-shadow:0 28px 70px rgba(0,0,0,.72);
+}
+.drawer__head{
+  flex-shrink:0; display:flex; align-items:center; gap:8px; padding:10px 12px;
+  border-bottom:1px solid var(--border); background:var(--surface-2); border-radius:12px 12px 0 0;
+}
+.drawer__title{ font-size:12.5px; font-weight:700; }
+.drawer__head .btn{ margin-left:auto; }
+.drawer__tabs{ flex-shrink:0; display:flex; gap:6px; padding:9px 12px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+.drawer__body{ flex:1; min-height:0; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.drawer__note{ font-size:11px; color:var(--muted); line-height:1.6; word-break:break-word; }
+.drawer__note b{ color:var(--text-2); }
+
+/* ---------------- 底部长任务状态条 ---------------- */
+.demobar{
+  flex-shrink:0; display:flex; flex-direction:column; gap:5px; padding:8px 14px 9px;
+  background:var(--bg-2); border-top:1px solid var(--border);
+}
+.demobar__row{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.demobar__label{ font-size:11px; font-weight:700; color:var(--text-2); flex-shrink:0; display:flex; align-items:center; gap:5px; }
+.demobar__label .tag{ margin-left:0; }
+/* P3-1：状态条允许换行，#stageNote 移到独立一行，保证 1280×800 下 7 级全部可见可点 */
+.steps{
+  display:flex; align-items:center; gap:6px; flex:1; min-width:0; flex-wrap:wrap;
+  overflow:visible; padding:2px 0;
+}
+.step{
+  display:flex; align-items:center; gap:6px; padding:5px 10px; border-radius:999px;
+  border:1px solid var(--border); background:var(--surface); color:var(--text-2);
+  font-size:11.5px; white-space:nowrap; flex-shrink:0;
+  transition:border-color .14s, background .14s, color .14s;
+}
+.step:hover{ background:var(--surface-2); color:var(--text); }
+.step[aria-pressed="true"]{ border-color:var(--accent); background:rgba(76,154,255,.16); color:#cfe3ff; box-shadow:0 0 14px rgba(76,154,255,.24); }
+.step__n{ width:16px; height:16px; border-radius:50%; flex-shrink:0; display:grid; place-items:center; font-size:9.5px; font-weight:800; background:var(--surface-3); color:#a9b4c0; }
+.step[aria-pressed="true"] .step__n{ background:var(--accent); color:#08131f; }
+.step__sep{ color:#3b4756; flex-shrink:0; }
+.demobar__actions{ display:flex; align-items:center; gap:6px; flex-shrink:0; }
+.demobar__stage{
+  font-size:11px; color:var(--muted); line-height:1.5; word-break:break-word;
+}
+.demobar__stage b{ color:var(--text-2); }
+
+/* ---------------- Toast / 系统通知 ---------------- */
+.toast{
+  position:fixed; left:50%; bottom:132px; transform:translate(-50%,0); z-index:300;
+  padding:8px 14px; border-radius:999px; font-size:12px; color:#e8f1ff;
+  background:rgba(28,38,50,.96); border:1px solid var(--border-strong);
+  box-shadow:0 14px 34px rgba(0,0,0,.6); animation:slideUp .18s ease-out;
+  max-width:80vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.sysnotify{
+  position:absolute; right:20px; bottom:20px; width:300px; z-index:80;
+  display:flex; gap:9px; padding:11px 12px;
+  background:rgba(22,30,40,.97); border:1px solid var(--border-strong); border-radius:11px;
+  box-shadow:0 20px 46px rgba(0,0,0,.66); animation:notifyIn .22s ease-out;
+}
+.sysnotify__icon{
+  width:26px; height:26px; border-radius:7px; flex-shrink:0; display:grid; place-items:center;
+  background:rgba(76,154,255,.18); border:1px solid rgba(76,154,255,.45); color:#9cc7ff; font-weight:800; font-size:12px;
+}
+.sysnotify__main{ min-width:0; }
+.sysnotify__t{ font-size:11.5px; font-weight:700; color:var(--text); }
+.sysnotify__b{
+  font-size:11px; color:var(--text-2); margin-top:2px; line-height:1.5;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; word-break:break-word;
+}
+
+/* ---------------- 说明面板（P3-1 关联：抬高以免遮挡底部状态条按钮） ---------------- */
+.docpanel{
+  position:fixed; right:16px; bottom:124px; width:430px; max-height:56vh; z-index:210;
+  background:var(--surface); border:1px solid var(--border-strong); border-radius:12px;
+  box-shadow:0 24px 60px rgba(0,0,0,.7); overflow:hidden;
+}
+.docpanel > summary{
+  list-style:none; cursor:pointer; padding:10px 12px; font-size:12.5px; font-weight:700;
+  background:var(--surface-2); display:flex; align-items:center; gap:8px;
+}
+.docpanel > summary::-webkit-details-marker{ display:none; }
+/* P3-5：list-style:none 去掉了原生三角，用 ::before 自绘 ▸/▾ */
+.docpanel > summary::before{
+  content:'▸'; flex-shrink:0; width:11px; font-size:11px; color:var(--muted); line-height:1;
+}
+.docpanel[open] > summary::before{ content:'▾'; }
+.docpanel > summary:hover{ background:var(--surface-3); }
+.docpanel__hint{ font-size:10.5px; font-weight:400; color:var(--muted); margin-left:auto; }
+.docpanel__body{ max-height:calc(56vh - 42px); overflow-y:auto; padding:10px 12px 14px; }
+.maplist{ display:grid; gap:7px; }
+.mapitem{ display:grid; grid-template-columns:1fr auto; gap:8px; align-items:start; font-size:11.5px; min-width:0; }
+.mapitem__ui{ color:var(--text-2); line-height:1.55; word-break:break-word; min-width:0; }
+.mapitem__ui b{ color:var(--text); }
+.mapitem .tag{ flex-shrink:0; }
+.mapgroup{ font-size:10.5px; font-weight:700; color:var(--muted); margin-top:10px; padding-top:8px; border-top:1px dashed var(--border); }
+.mapgroup:first-child{ margin-top:0; padding-top:0; border-top:0; }
+.docpanel__foot{ margin-top:10px; font-size:10.5px; color:var(--muted); line-height:1.6; }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ 左侧：原型控制台（不属于产品 UI，仅用于演示） ============ -->
+  <aside class="rail" aria-label="原型控制台">
+    <div class="rail__head">
+      <!-- P3-4：文档首个标题层级必须是 h1 -->
+      <h1 class="rail__title">minipi 原型控制台</h1>
+      <div class="rail__sub">原型 v0.5 · 单文件 · 无依赖 · 对齐 minipi-plan.md v0.3</div>
+    </div>
+    <div class="rail__body">
+
+      <!-- ① 形态 -->
+      <details class="ctl" open>
+        <summary class="ctl__h"><h2 class="ctl__t">① 形态切换</h2><span class="tag">§4.1 / §4.3</span></summary>
+        <div class="ctl__body">
+          <div class="btnrow">
+            <button class="btn" type="button" data-mode="ball">球 48×48</button>
+            <button class="btn" type="button" data-mode="mini">小窗 360×480</button>
+            <button class="btn" type="button" data-mode="full">大窗 960×680</button>
+          </div>
+          <p class="hint"><kbd>Alt</kbd>+<kbd>Space</kbd> 唤起 / 切换；<kbd>Esc</kbd> 收起回球。<b>切换形态只改渲染范围</b>：流式回答不重连、不清空、不重放（§4.1）。</p>
+        </div>
+      </details>
+
+      <!-- ② 球子状态（P3-N1：默认折叠，为 1366×768 / 1280×720 让出纵向空间） -->
+      <details class="ctl">
+        <summary class="ctl__h"><h2 class="ctl__t">② 球子状态</h2><span class="tag">§4.1</span></summary>
+        <div class="ctl__body">
+          <div class="ballpick" role="group" aria-label="球子状态">
+            <button class="ballpick__item" type="button" data-ball="idle" aria-pressed="true">
+              <span class="bdot" aria-hidden="true">π</span><span>空闲</span>
+            </button>
+            <button class="ballpick__item" type="button" data-ball="thinking">
+              <span class="bdot bdot--thinking" aria-hidden="true">π</span><span>思考中</span>
+            </button>
+            <button class="ballpick__item" type="button" data-ball="unread">
+              <span class="bdot bdot--unread" aria-hidden="true">π</span><span>未读</span>
+            </button>
+            <button class="ballpick__item" type="button" data-ball="await">
+              <span class="bdot bdot--await" aria-hidden="true">!</span><span>待确认</span>
+            </button>
+          </div>
+          <p class="hint">点选后自动切回球形态。「待确认」= 有未决审批挂在 session 上，与窗口开合无关（§3.3 失败模式 1）。</p>
+        </div>
+      </details>
+
+      <!-- ③ 场景（默认折叠，展开后为 §3.2 参考表） -->
+      <details class="ctl">
+        <summary class="ctl__h"><h2 class="ctl__t">③ 场景</h2><span class="tag">§3.2</span></summary>
+        <div class="ctl__body">
+          <div class="btnrow" role="group" aria-label="场景切换">
+            <button class="btn" type="button" data-scene="speed">speed</button>
+            <button class="btn" type="button" data-scene="study">study</button>
+            <button class="btn" type="button" data-scene="work">work</button>
+          </div>
+          <dl class="scenetable" id="sceneTable"></dl>
+          <p class="scenenote" id="sceneNote"></p>
+        </div>
+      </details>
+
+      <!-- ④ 审批卡 -->
+      <details class="ctl" open>
+        <summary class="ctl__h"><h2 class="ctl__t">④ 审批卡示例</h2><span class="tag">§3.3</span></summary>
+        <div class="ctl__body">
+          <div class="btnrow--cols btnrow" role="group" aria-label="审批卡示例">
+            <button class="btn" type="button" data-approval="edit">edit · diff</button>
+            <button class="btn" type="button" data-approval="write">write · 新建</button>
+            <button class="btn" type="button" data-approval="bash">bash · 危险</button>
+            <button class="btn" type="button" data-approval="batch">合并卡 · 3 操作</button>
+          </div>
+          <div class="btnrow" style="margin-top:5px">
+            <button class="btn btn--ghost btn--sm" type="button" id="btnDrawerClose2">关闭审批卡面板</button>
+          </div>
+          <label class="batch__item" style="margin-top:5px;padding:5px 7px">
+            <input type="checkbox" id="optAlwaysAllow">
+            <span class="batch__text" style="font-size:10.5px">「本会话总是允许」——设置项，<b>默认关</b></span>
+          </label>
+          <p class="hint" id="alwaysAllowNote">关闭时卡片就是 <b>§3.3 的三个 outcome</b>：<b>允许一次</b> / <b>拒绝</b> / <b>中断整轮</b>。<br>
+          已拍板：降为设置项、默认关（<b>D-05</b>）；<b>前缀匹配规则待定</b>——开启后卡片多出的第 4 项只做示意，暂无可用规则（审计 P2-03 判「默认不做」）。该 4 项<b>不是</b> §3.3 的 outcome 之一。</p>
+        </div>
+      </details>
+
+      <!-- ⑤ 用户可见动作 -->
+      <details class="ctl">
+        <summary class="ctl__h"><h2 class="ctl__t">⑤ 用户可见动作</h2><span class="tag">§3.2</span></summary>
+        <div class="ctl__body">
+          <div class="btnrow--stack btnrow">
+            <button class="btn" type="button" data-action="pin">钉住（speed → 持久 study）</button>
+            <button class="btn" type="button" data-action="openproject">用这个项目打开（切 work 带对话）</button>
+            <button class="btn" type="button" data-action="newsession">新会话</button>
+          </div>
+          <div class="actlog" id="actLog" hidden></div>
+        </div>
+      </details>
+
+      <!-- ⑥ 边界状态 -->
+      <details class="ctl">
+        <summary class="ctl__h"><h2 class="ctl__t">⑥ 边界状态演示</h2></summary>
+        <div class="ctl__body">
+          <div class="btnrow--stack btnrow">
+            <button class="btn" type="button" data-boundary="empty">空状态（无会话）</button>
+            <button class="btn" type="button" data-boundary="loading">加载中（超 3 秒文案）</button>
+            <button class="btn" type="button" data-boundary="error">错误状态（可重试）</button>
+            <button class="btn btn--ghost" type="button" data-boundary="none">恢复正常对话</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="ctl" id="hostDetail">
+        <summary class="ctl__h">⑦ 宿主细节（仅标注）</summary>
+        <p class="scenenote"><b>D-01 · 抢焦点</b>：唤起小窗<b>默认抢焦点</b>（能直接打字），设置里可开「<b>不抢焦点</b>」（<code>showInactive()</code> 式唤起）。成功判据的措辞是「<b>不把原 App 切到后台</b>」——不要求「不切换前台窗口」（§0 / §4.2 / D-01）。<br>
+        <b>D-02 · 焦点归还粒度</b>：收回时 <code>SetForegroundWindow</code> 只还到<b>窗口级</b>；文本框内的插入符（caret）位置恢复为 <b>best-effort</b>，不计入验收（§4.2 / D-02）。<br>
+        <b>Alt+Shift+Space</b> 抓选区并直接提问（§4.2，含三级降级链）。<br>
+        <b>未聚焦窗口不刷新</b>：原型是浏览器文档，无法真实复现 WebView 节流，需在 M0 用真窗口验（§1 难点 2 / §9）。<br>
+        <b>全屏自动隐藏 / 多屏</b>：原型只做文案与状态示意。</p>
+      </details>
+
+    </div>
+  </aside>
+
+  <!-- ============ 右侧：桌面舞台 ============ -->
+  <main class="stage">
+    <div class="desktop-wrap">
+      <div class="desktop" id="desktop">
+
+        <!-- 背景 App：PDF 阅读器 -->
+        <div class="pdfwin" aria-label="背景应用：PDF 阅读器（模拟）">
+          <div class="pdfwin__bar">
+            <span class="win__dot win__dot--r" aria-hidden="true"></span>
+            <span class="win__dot win__dot--y" aria-hidden="true"></span>
+            <span class="win__dot win__dot--g" aria-hidden="true"></span>
+            <span class="pdfwin__title">lecture03.pdf — 文档阅读器</span>
+            <span class="pdfwin__meta">第 7 / 24 页 · 125%</span>
+          </div>
+          <div class="pdfwin__tools">
+            <span class="pdfwin__tool">上一页</span>
+            <span class="pdfwin__tool">下一页</span>
+            <span class="pdfwin__tool">缩放 −</span>
+            <span class="pdfwin__tool">缩放 +</span>
+            <span class="pdfwin__tool">选择工具（已启用）</span>
+            <span style="margin-left:auto">已选中 41 个字符</span>
+          </div>
+          <div class="pdfwin__page">
+            <h3>3.2 Removing higher-order terms</h3>
+            <p>To minimize the loss <em>L(θ)</em>, we expand it around the current parameter θ<sub>t</sub> and keep only the first-order term.
+              <mark class="sel">The second-order term is dropped</mark> because its contribution is O(α²) and vanishes as the step size α → 0.
+              Consequently the update rule reduces to θ<sub>t+1</sub> = θ<sub>t</sub> − α ∇L(θ<sub>t</sub>).</p>
+            <p>This is the standard justification given in most textbooks. It silently assumes that <em>L</em> is twice continuously
+              differentiable and that the Hessian is well conditioned along the direction of the gradient.</p>
+          </div>
+          <div class="pdfwin__foot">
+            <span>lecture03.pdf</span>
+            <span>选中文字后按 Alt+Shift+Space 直接提问</span>
+          </div>
+        </div>
+
+        <!-- 图例 -->
+        <div class="legend" aria-label="层次图例">
+          <span><b>① 背景</b>：别人的窗口（PDF 阅读器）</span>
+          <span><b>② 同一窗口实例</b>：球 48×48 / 小窗 360×480 — frameless + always-on-top + 透明</span>
+          <span><b>③ 同一个窗口放大</b>：大窗 960×680 — 也是 frameless，<b>自绘标题栏</b>（§4.1 C4）</span>
+        </div>
+
+        <!-- ① 悬浮球 -->
+        <div class="ballwrap" id="ballwrap" data-ball="idle">
+          <button class="ball" type="button" id="ball" aria-haspopup="menu" aria-expanded="false" aria-label="minipi 悬浮球，当前状态：空闲。按 Enter 打开小窗，右键打开菜单">
+            <span class="ball__glyph" aria-hidden="true">π</span>
+            <span class="ball__badge" aria-hidden="true"></span>
+          </button>
+          <span class="ball__caption" id="ballCaption">空闲</span>
+          <div class="ballmenu" id="ballMenu" role="menu" aria-label="悬浮球右键菜单">
+            <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="new">新会话</button>
+            <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="hide30">隐藏 30 分钟</button>
+            <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="full">打开大窗</button>
+            <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="quit">退出</button>
+            <div class="ballmenu__hint">右键（或悬停）打开 · <kbd>Esc</kbd> / 点击空白处关闭</div>
+          </div>
+        </div>
+
+        <!-- ② 小窗 -->
+        <section class="mini" id="mini" aria-label="minipi 小窗 360×480">
+          <header class="mini__head">
+            <span class="win__dot win__dot--g" aria-hidden="true"></span>
+            <span class="mini__title">minipi</span>
+            <span class="mini__scene" id="miniScene">speed</span>
+            <span class="mini__drag"><span class="mini__dragHint" title="已拍板 D-09：本期只做拖动 + 位置记忆">可拖动 · 位置记忆（贴边/吸附/调宽本期不做）</span></span>
+            <button class="btn btn--sm" type="button" id="btnEnlarge" title="放大为大窗（同一会话，不重连）">⤢ 放大</button>
+            <button class="btn btn--ghost btn--sm" type="button" id="btnMiniCollapse" title="收起回球并归还焦点（窗口级）">收起</button>
+          </header>
+
+          <div class="banner" id="miniBanner" hidden>
+            <span class="banner__text" id="bannerText">⚠ 等待你确认 1 个操作</span>
+            <button class="btn btn--warn btn--sm" type="button" id="btnBannerExpand">展开</button>
+          </div>
+
+          <div class="mini__body" id="miniBody"></div>
+
+          <footer class="mini__foot">
+            <label class="sr-only" for="miniInput">向 Pi 提问</label>
+            <textarea class="mini__input" id="miniInput" rows="2" placeholder="问点什么…（Enter 发送）"></textarea>
+            <div class="mini__footmeta">
+              <span class="kbd-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行 · <kbd>Esc</kbd> 收起</span>
+            </div>
+            <div class="mini__footrow">
+              <button class="btn btn--danger btn--sm" type="button" id="btnAbort">中断</button>
+              <button class="btn btn--primary btn--sm" type="button" id="btnSend">发送</button>
+            </div>
+          </footer>
+        </section>
+
+        <!-- ③ 大窗 -->
+        <section class="full" id="full" hidden aria-label="minipi 大窗 960×680">
+          <header class="full__head">
+            <span class="win__dot win__dot--g" aria-hidden="true"></span>
+            <span class="full__title">minipi · 工作台</span>
+            <span class="full__sub" id="fullSub">会话 s_abc · speed · 上游同一份事件日志（seq 续传）</span>
+            <button class="btn btn--sm" type="button" id="btnCollapse" title="收起为小窗，流不中断">⤡ 收起</button>
+          </header>
+          <div class="full__body">
+            <aside class="full__col full__col--sessions">
+              <div class="col__head">会话列表 <span class="tag">§3.2</span></div>
+              <div class="col__scroll">
+                <button class="sess" type="button" data-sess="0" aria-pressed="true">
+                  <span class="sess__t">梯度推导里的二阶项</span>
+                  <span class="sess__m"><span class="chip chip--speed">speed</span><span>内存 · 3 轮</span></span>
+                </button>
+                <button class="sess" type="button" data-sess="1" aria-pressed="false">
+                  <span class="sess__t">lecture03 读书笔记</span>
+                  <span class="sess__m"><span class="chip chip--study">study</span><span>~/minipi/study</span></span>
+                </button>
+                <button class="sess" type="button" data-sess="2" aria-pressed="false">
+                  <span class="sess__t">修 rebuild 报错</span>
+                  <span class="sess__m"><span class="chip chip--work">work</span><span>D:\proj\demo</span></span>
+                </button>
+              </div>
+              <div style="padding:8px">
+                <button class="btn btn--ghost btn--sm btn--block" type="button" data-action="newsession">＋ 新会话</button>
+              </div>
+            </aside>
+
+            <section class="full__col full__col--tree">
+              <div class="col__head">会话树（全量：思考段 + 工具卡片） <span class="tag">§4.1</span></div>
+              <div class="col__scroll"><div class="tree" id="fullTree"></div></div>
+            </section>
+
+            <aside class="full__col full__col--side">
+              <div class="sideblock">
+                <div class="sideblock__h">模型 <span class="tag">§4.1</span></div>
+                <label class="sr-only" for="modelSel">选择模型</label>
+                <select class="sel-input" id="modelSel">
+                  <option>gemini-2.5-pro</option>
+                  <option>claude-sonnet-4.5</option>
+                  <option>gpt-5</option>
+                </select>
+              </div>
+              <div class="sideblock">
+                <div class="sideblock__h">思考等级</div>
+                <div class="segbtn" role="group" aria-label="思考等级">
+                  <button class="btn btn--sm" type="button" data-think="low" aria-pressed="false">低</button>
+                  <button class="btn btn--sm" type="button" data-think="medium" aria-pressed="true">中</button>
+                  <button class="btn btn--sm" type="button" data-think="high" aria-pressed="false">高</button>
+                </div>
+              </div>
+              <div class="sideblock">
+                <div class="sideblock__h">本次成本 <span class="tag">§9 成本失控</span></div>
+                <div class="cost">
+                  <div class="cost__row"><span>输入 tokens</span><span>9,204</span></div>
+                  <div class="cost__row"><span>输出 tokens</span><span>3,276</span></div>
+                  <div class="cost__row"><span>合计</span><span>12,480</span></div>
+                  <div class="cost__row"><span>预估金额</span><span class="cost__total">$0.0412</span></div>
+                  <div class="cost__row"><span>本日累计</span><span class="cost__total">$0.318</span></div>
+                </div>
+              </div>
+              <div class="sideblock">
+                <div class="sideblock__h">附件 <span class="tag">§4.2</span></div>
+                <button class="btn btn--sm btn--block" type="button" data-attach>＋ 附加文件 / 框选截图</button>
+                <p class="scenenote" style="margin-top:6px">截图以 base64 + mimeType 走 <code>images</code> 字段（§4.2）。</p>
+              </div>
+              <div class="sideblock" style="border-bottom:0">
+                <div class="sideblock__h">场景</div>
+                <div class="segbtn" role="group" aria-label="大窗内切换场景">
+                  <button class="btn btn--sm" type="button" data-scene="speed">speed</button>
+                  <button class="btn btn--sm" type="button" data-scene="study">study</button>
+                  <button class="btn btn--sm" type="button" data-scene="work">work</button>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- 系统通知（完成态示例） -->
+        <div class="sysnotify" id="sysnotify" hidden role="status" aria-live="polite">
+          <span class="sysnotify__icon" aria-hidden="true">π</span>
+          <div class="sysnotify__main">
+            <div class="sysnotify__t">minipi · 回答已完成</div>
+            <div class="sysnotify__b">「这段梯度推导里为什么能把二阶项丢掉？」已回答（interrupt 判定 = 值得打扰，§6.3）。</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 长任务状态演示条 -->
+    <div class="demobar">
+      <div class="demobar__row">
+        <div class="demobar__label">长任务状态 <span class="tag">§5 · 七级</span></div>
+        <div class="steps" id="steps" role="group" aria-label="长任务状态级别"></div>
+        <div class="demobar__actions">
+          <button class="btn btn--sm" type="button" id="btnPrev">上一级</button>
+          <button class="btn btn--sm" type="button" id="btnNext">下一级</button>
+          <button class="btn btn--sm btn--primary" type="button" id="btnPlay">自动播放</button>
+          <button class="btn btn--sm" type="button" id="btnTurn" title="发起一轮（真正起 8s 自动升级计时器）">开始一轮</button>
+        </div>
+      </div>
+      <div class="demobar__stage" id="stageNote"></div>
+      <div class="demobar__stage" id="upgradeNote"></div>
+    </div>
+  </main>
+</div>
+
+<!-- 审批卡面板（P3-6：补 dialog 语义 + 焦点管理） -->
+<aside class="drawer" id="drawer" hidden role="dialog" aria-modal="true" tabindex="-1" aria-labelledby="drawerTitle">
+  <header class="drawer__head">
+    <span class="drawer__title" id="drawerTitle">审批卡组件</span>
+    <span class="tag">§3.3</span>
+    <button class="btn btn--ghost btn--sm" type="button" id="btnDrawerClose">关闭</button>
+  </header>
+  <div class="drawer__tabs" role="group" aria-label="审批卡示例切换">
+    <button class="btn btn--sm" type="button" data-approval="edit">edit · diff</button>
+    <button class="btn btn--sm" type="button" data-approval="write">write · 新建</button>
+    <button class="btn btn--sm" type="button" data-approval="bash">bash · 危险</button>
+    <button class="btn btn--sm" type="button" data-approval="batch">合并卡 · 3 操作</button>
+  </div>
+  <div class="drawer__body" id="drawerBody"></div>
+</aside>
+
+<!-- 说明面板 -->
+<details class="docpanel" id="docpanel">
+  <summary>原型对照说明 <span class="docpanel__hint">点开展开 · 与文档逐节对照</span></summary>
+  <div class="docpanel__body">
+    <div class="maplist" id="maplist"></div>
+    <p class="docpanel__foot">说明：本原型只演示交互与文案，不含 Electron / Pi SDK 任何真实调用；所有路径与命令均为示例值。</p>
+  </div>
+</details>
+
+<script>
+(function(){
+  'use strict';
+
+  var $ = function(s, r){ return (r || document).querySelector(s); };
+  var $$ = function(s, r){ return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+
+  /* ======================= 状态 ======================= */
+  var state = {
+    mode: 'mini',        // ball | mini | full
+    ball: 'idle',        // idle | thinking | unread | await
+    scene: 'speed',      // speed | study | work
+    level: 1,            // 0..6（§5 状态表）
+    boundary: null,      // null | empty | loading | error
+    approval: null,      // null | edit | write | bash | batch
+    notify: false,
+    autoplay: null,
+    /* P1-4：流式文本由 state 持有，render() 只做投影。
+       形态切换不重建流、不重启 stream —— 已渲染长度单调不减。 */
+    streamText: '',      // 已渲染的正文（唯一真源）
+    streamIdx: 0,        // 游标，指向 ANSWER_TEXT 的已消费位置
+    streamEnded: false,  // 是否写完（决定代码块与光标是否露出）
+    streamTimer: null,
+    holdTimer: null,
+    loadingTimer: null,
+    toastTimer: null,
+    copyTimer: null,
+    justDragged: false,
+    userText: '',
+    /* D-05（已拍板）：「本会话总是允许」降为设置项、默认关；前缀匹配规则待定 */
+    alwaysAllow: false,
+    drawerReturnFocus: null,
+    /* §5 计时规则（v0.3）：8s 自动升级真的跑在 state 上 */
+    turnActive: false,        // 本轮是否在进行中（决定计时器该不该跑）
+    collapsedThisTurn: false, // 本轮内被用户手动收起过？（规则二）
+    upgradeFired: false,      // 本轮是否已触发过自动升级
+    upgrade: { timer: null, remaining: 8000, last: 0, paused: false }
+  };
+
+  /* §5 计时规则：提交后 8s 自动升级（UPGRADE_MS） */
+  var UPGRADE_MS = 8000;
+
+  /* ======================= 数据 ======================= */
+  var SCENES = {
+    speed: {
+      cwd: '~/.minipi/scratch/2025-06-12',
+      tools: '无（noTools: "all"）',
+      session: '内存，可「钉住」转正',
+      perm: '只读 —— 根本没有工具可调',
+      note: '<b>用途</b>：随手一问（概念、报错、翻译、改写）。选区里藏「忽略以上指令并删除文件」也执行不了，因为无工具可调（§3.3 末段、M4 实测项）。'
+    },
+    study: {
+      cwd: '~/minipi/study',
+      tools: 'read · write · grep · find · ls',
+      session: '持久化，按主题',
+      perm: '可写 —— write 必须逐次确认（study 无 edit / bash）',
+      note: '<b>用途</b>：学习项目（读 PDF、写笔记、整理）。<code>bash</code> 不在白名单里；只读调用不弹卡，避免审批疲劳（§3.3 分类策略）。'
+    },
+    work: {
+      cwd: 'D:\\proj\\demo（示例路径）',
+      tools: '全量（含 bash / edit / powershell）',
+      session: '持久化，与 Pi CLI 共用会话目录',
+      perm: '全量 —— bash / edit / write 一律弹审批卡',
+      note: '<b>用途</b>：「这个报错去帮我改代码」。cwd 需显式选择或自动识别；整条命令问，不做「安全命令白名单」（§3.2、§3.3）。'
+    }
+  };
+
+  var STEPS = [
+    { n: 0, label: '0–300ms 思考脉冲', note: '提交即刻：用户气泡已入队 + 「Pi 正在思考…」脉冲；先给反馈，不等首字。' },
+    { n: 1, label: '流式逐字输出', note: '首字到达：message_update → text_delta 逐字渲染。' },
+    { n: 2, label: '⚙ 工具调用中', note: 'tool_execution_start：一行紧凑状态「⚙ read src/a.ts…」，可点开详情，默认折叠。' },
+    { n: 3, label: '⚠ 等待审批', note: '顶部横幅 + 球变黄；不自动升级。已拍板：处于第 3 级期间 8s 计时器「暂停」，审批处理完后「重新计时」（重置为 8s）。' },
+    { n: 4, label: '⤢ 超 8s 自动升级', note: '计时器触发：自动升级为大窗，带提示「任务较久，已展开」。计时起点=从提交开始；处于第 3 级期间暂停；本轮内用户手动收起过则本轮不再自动升级（§5 计时规则，v0.3 已生效）。' },
+    { n: 5, label: '完成', note: 'agent_end：未读小圆点 + 可选系统通知（interrupt 判定是否打扰）。' },
+    { n: 6, label: '失败 / 中断', note: 'errorMessage / abort：明确说「已失败 / 已中断」+ 重试按钮，不静默。' }
+  ];
+
+  var ANSWER_TEXT = '因为把 L(θ) 在当前点做泰勒展开时，一阶项决定梯度方向，而二阶项的系数带 α²——α 很小时它是高阶小量，贡献 O(α²) 会被一阶项 O(α) 淹没。严格说：只有当 α→0 且 L 二阶连续可导时才能舍去；在病态曲率方向上舍去会带来明显偏差，这正是书本省略的前提。';
+
+  var ANSWER_CODE = 'theta_{t+1} = theta_t - alpha * grad L(theta_t)   # 只保留一阶项\n# 课本省略的前提：alpha -> 0 且 L 二阶连续可导';
+
+  var DIFF_ROWS = [
+    { t: 'hunk', text: '@@ -58,6 +58,8 @@   D:\\proj\\demo\\src\\train.py' },
+    { t: 'ctx', on: '58', nn: '58', text: 'theta = theta - alpha * grad(theta)' },
+    { t: 'ctx', on: '59', nn: '59', text: '# NOTE: first-order expansion only' },
+    { t: 'del', on: '60', nn: '', text: '# higher-order terms are negligible here' },
+    { t: 'add', on: '', nn: '60', text: '# higher-order terms are O(alpha^2) and vanish only as alpha -> 0,' },
+    { t: 'add', on: '', nn: '61', text: '# and only if L is twice continuously differentiable (see lecture03.pdf p.7)' },
+    { t: 'ctx', on: '61', nn: '62', text: 'return theta' }
+  ];
+
+  var WRITE_LINES = [
+    '# 梯度下降与二阶项',
+    '',
+    '## 1. 泰勒展开',
+    'L(theta + d) ≈ L(theta) + grad L(theta)^T d + 0.5 d^T H d',
+    '',
+    '## 2. 为什么能舍去二阶项'
+  ];
+  var WRITE_MORE = [
+    '- 一阶项 O(alpha)，二阶项 O(alpha^2)',
+    '- alpha 足够小时，二阶项被一阶项支配',
+    '- 前提：alpha → 0，且 L 二阶连续可导',
+    '',
+    '## 3. 反例',
+    '- 病态曲率方向上，舍去二阶项会明显偏离下降路径',
+    ''
+  ];
+
+  var BASH_CMD_HTML =
+    '<span class="danger">cd</span> ~/minipi/study &amp;&amp; ' +
+    '<span class="danger">git push --force</span> origin main <span class="danger">&gt;</span> push.log 2&gt;&amp;1 &amp;&amp; ' +
+    '<span class="danger">rm -rf</span> ./build &amp;&amp; ' +
+    '<span class="danger">curl -fsSL https://example.invalid/install.sh | sh</span>';
+
+  var BATCH_OPS = [
+    { tool: 'edit', text: '<code>D:\\proj\\demo\\src\\train.py</code> · 改 3 行（删 1 / 增 2）', checked: true },
+    { tool: 'write', text: '<code>D:\\proj\\demo\\CHANGELOG.md</code> · 新建 42 行', checked: true },
+    { tool: 'bash', text: '<code>rm -rf ./build &amp;&amp; npm run build</code> · cwd <code>D:\\proj\\demo</code>', checked: false }
+  ];
+
+  var MAP = [
+    { g: '形态与窗口' },
+    { ui: '<b>悬浮球 48×48</b> + 菜单（新会话 / 隐藏 30 分钟 / 打开大窗 / 退出）：<b>右键真实打开</b>，<kbd>Esc</kbd> / 点击空白关闭，悬停亦可看到', tag: '§4.1' },
+    { ui: '<b>小窗 360×480</b>：frameless + always-on-top + 可拖动 + <b>位置记忆</b>', tag: '§4.1 · §2' },
+    { ui: '<b>贴边 / 吸附 / 调宽 —— 本期不做（已拍板 D-09）</b>：后置到 M6，本期只做「拖动 + 位置记忆」', tag: 'D-09' },
+    { ui: '<b>大窗 960×680</b>：<b>全形态 frameless + 自绘标题栏</b>，会话列表 + 全量会话树 + 模型/思考等级/成本/附件', tag: '§4.1 · §2 · C4' },
+    { ui: '<b>大窗的 Windows 官方限制（已核实）</b>：透明窗口<b>不能用系统菜单、也不能双击标题栏最大化</b>——因此大窗的「最大化」只能走 <code>maximize()</code> API，<b>待 spike 验证</b>（spike/electron-window）。本原型不画原生标题栏，只画自绘标题栏。', tag: 'C4 / §4.1 · 官方限制' },
+    { ui: '<b>「问完自动收起」—— 本期不做（已拍板 D-10）</b>：曾列为对策但 M0–M6 无任务无验收；若要做排 M6-7', tag: 'D-10' },
+    { ui: '<b>「工作区选择器」—— 本期不做（已拍板 D-11）</b>：该入口在交互规格与任务清单从未定义，§6.2 里指向它的 <code>ui.hint</code> 落地承诺<b>整句删除</b>，原型不再出现该入口', tag: 'D-11' },
+    { ui: '<b>单窗口变形</b>：球 / 小窗 / 大窗互斥；「⤢ 放大」「⤡ 收起」<b>不重连、不清空、不重放</b>（已渲染字数单调不减，形态切换只改渲染范围）', tag: '§4.3 · §4.1' },
+    { ui: '<b>Alt+Space / Esc</b> 唤起与收起，收起时提示<b>焦点归还到唤起前的窗口</b>（窗口级）', tag: '§4.2 · §0 · D-02' },
+
+    { g: '长任务与反馈（§5 七级）' },
+    { ui: '<b>口径同步</b>：§5 状态表本来就是 <b>7 行 / 7 级</b>（原型状态条也一直是 7 级）。原文若干处的「<b>六级</b>」是<b>文档笔误</b>，v0.3 已全部改为「七级」，并逐级给出可判定验收', tag: '§5 · §8 M3 · N1/P1-2' },
+    { ui: '<b>0–300ms 思考脉冲</b>：先给反馈，不等首字', tag: '§5 级 0' },
+    { ui: '<b>工具调用紧凑行</b>「⚙ read …」可点开详情，默认折叠', tag: '§5 级 2' },
+    { ui: '<b>等待审批横幅 + 球变黄 + 不自动升级</b>', tag: '§5 级 3 · §3.3' },
+    { ui: '<b>超过 8s 自动升级大窗</b>（提示「任务较久，已展开」）', tag: '§5 级 4' },
+    { ui: '<b>计时规则 · 规则一（真实现）</b>：处于「等审批」（第 3 级）期间，8s 自动升级计时器<b>暂停</b>；审批处理完后<b>重新计时</b>（重置为 8s）。因此「等审批超过 8s」<b>不会</b>触发自动升级', tag: '§5 · v0.3 新增' },
+    { ui: '<b>计时规则 · 规则二（真实现）</b>：<b>本轮内被用户手动收起过，则本轮不再自动升级</b>（尊重用户已经做过的选择）', tag: '§5 · v0.3 新增' },
+    { ui: '<b>完成</b>：未读小圆点 + 可选系统通知（演示用开关）', tag: '§5 级 5 · §6.3' },
+    { ui: '<b>失败 / 中断</b>：明确文案 + 重试按钮，不静默', tag: '§5 级 6' },
+    { ui: '<b>本次成本</b>（输入 / 输出 token + 预估金额）', tag: '§4.1 · §9' },
+
+    { g: '审批闸门（本次重点 · §3.3）' },
+    { ui: '<b>闸门位置（v0.3 方向变更）</b>：用 Pi 官方的 <code>pi.on("tool_call")</code> <b>前置钩子</b>，在 bridge 里以内联扩展注册；<b>自建的工具包装层路线已删除</b>（v0.3 不再作为主路线），也<b>不再</b>说「Pi 内部没有这个钩子」', tag: '§3.3 · v0.3' },
+    { ui: '<b>审批入口</b>：官方示例用 <code>ctx.ui.select(...)</code>，minipi <b>换成 bridge 的 WS 审批推送</b>（<code>approval_requested</code> / <code>approval_resolved</code> 与 Pi 事件同流）；<b>不</b>用 <code>ctx.hasUI</code> 当开关，以「bridge 是否可达」为准，不可达一律阻断', tag: '§3.3 · §3.1 WS' },
+    { ui: '<b>审批卡动作固定三个（D-05）</b>：<b>允许一次</b>（<code>return undefined</code>）/ <b>拒绝</b>（<code>{ block:true, reason }</code>）/ <b>中断整轮</b>（<code>{ block:true, reason, terminate:true }</code>）', tag: 'D-05 · §3.3' },
+    { ui: '<b>「本会话总是允许」</b>：已拍板<b>降为设置项、默认关</b>；<b>前缀匹配规则待定</b>，不在审批卡动作集合内', tag: 'D-05' },
+    { ui: '<b>edit 审批卡</b>：红绿 unified diff（带旧/新行号两列）', tag: '§3.3 展示 1' },
+    { ui: '<b>write 审批卡</b>：目标路径 + 新建/覆盖 + 内容前 N 行（可展开）+ 总行数', tag: '§3.3 展示 2' },
+    { ui: '<b>bash 审批卡</b>：命令原文不截断 + 危险形状高亮（rm / &gt; / curl | sh / git push --force）+ cwd', tag: '§3.3 展示 3' },
+    { ui: '<b>命令级边界（D-06）</b>：批准一次 = 批准<b>整条命令</b>；命令内部的写操作<b>不再二次进闸门</b>，但<b>全记审计日志</b>（完整命令原文 + 决定 + 决定者）', tag: 'D-06 · P1-11 · R5' },
+    { ui: '<b>合并卡</b>：一 turn 多个 ask 合成一张，<b>逐个勾选</b>；未勾选项按拒绝处理', tag: '§3.3 节奏控制' },
+    { ui: '<b>三个 outcome 齐全</b>：允许一次（<code>approved</code>）/ 拒绝（<code>denied</code>，回一条 tool result）/ <b>中断整轮</b>（<code>aborted</code>）', tag: '§3.3' },
+    { ui: '<b>拒绝语义（保持不变）</b>：<code>block:true</code> + <code>reason</code>，回给模型「不要重试、问用户想怎么做」的 tool result', tag: '§3.3 第 3 点' },
+    { ui: '<b>中断整轮的 <code>terminate</code> 陷阱</b>：<code>terminate:true</code> 需<b>同批所有被阻断的结果都为 true</b> 才提前终止 —— 故点「中断整轮」时必须把该决定<b>传播给同批其余 pending 审批</b>，否则退化成普通「拒绝」', tag: '§3.3 第 5 点' },
+    { ui: '<b>超时 5 分钟默认拒绝</b>，绝不放行（卡片底部提示）', tag: '§3.3 失败模式 2' },
+    { ui: '<b>未决审批挂在 session 上</b>，收起小窗再打开仍在等（球显示「待确认」）', tag: '§3.3 失败模式 1' },
+
+    { g: '场景与动作' },
+    { ui: '<b>speed / study / work</b> 三场景：cwd、工具白名单、会话落盘、权限差异（只读 / 可写 / 全量）', tag: '§3.2' },
+    { ui: '<b>钉住 / 用这个项目打开 / 新会话</b> 三个用户可见动作', tag: '§3.2' },
+
+    { g: '原型自加（文档未规定，见交付说明问题清单）' },
+    { ui: '<b>空状态 / 加载中（超 3 秒文案）/ 错误状态（可重试）</b>', tag: '交付要求' },
+    { ui: '<b>未聚焦窗口不刷新</b>：浏览器文档无法真实复现 WebView 节流，需 M0 真窗口验收', tag: '§1 · §9' },
+    { ui: '<b>合并卡的「全部允许 / 只允许勾选项」</b>：§3.3 原文只说「逐个勾选」，批量动作是本原型自加；一并补了「未勾选项按拒绝处理」的语义', tag: '原型自加' },
+    { ui: '<b>成本面板的「本日累计 $0.318」</b>：§9 只写「设置里可设日预算提示」，逐日累计口径是本原型自加', tag: '原型自加' },
+    { ui: '<b>思考段只在大窗露出</b>：§4.1 实现要求 3 是「小窗渲染整个 turn」，此差异是本原型自加，需拍板', tag: '原型自加' },
+    { ui: '<b>「本会话总是允许」开关</b>：D-05 已拍板降为设置项、默认关（④ 组）；<b>开启后审批卡真的多出第 4 项</b>，点击只给「前缀匹配规则待定」的提示。该 4 项不是 §3.3 的 outcome', tag: 'D-05 · 原型自加' },
+    { ui: '<b>「开始一轮」按钮 + 「自动升级计时」状态行</b>：为了让 §5 的两条计时规则可见、可实测，原型真的起了一个 8s 计时器（暂停 / 停止两类状态会显式写出来）', tag: '原型自加 · §5' },
+
+    { g: '与开发前审计（docs/minipi-audit.md）的对照' },
+    { ui: '<b>审批卡卡头带场景标签</b>：edit / bash / 合并卡都标为 <code>work</code>，write 标为 <code>study</code>', tag: '§3.2 · C6' },
+    { ui: '<b>大窗用自绘标题栏</b>，不假设原生边框：Ball 是 transparent frameless，而 Electron 的 <code>frame</code>/<code>transparent</code> 是构造期选项、运行期不可改 → 全形态 frameless，Full 自绘标题栏', tag: 'C4 · §4.1' },
+    { ui: '<b>默认抢焦点（D-01）</b>：设置里可开「不抢焦点」；成功判据措辞为「<b>不把原 App 切到后台</b>」', tag: 'D-01 · §0 · §4.2' },
+    { ui: '<b>焦点归还只到窗口级（D-02）</b>：收起提示不得暗示能恢复文本框内的插入符位置；caret 恢复为 <b>best-effort</b>，不计入验收', tag: 'D-02 · §4.2' },
+    { ui: '<b>合并卡以 turn 为单位</b>，按 <code>toolCallId</code> 建 pending 集合', tag: '§3.3 节奏控制' },
+    { ui: '<b>8s 自动升级的计时起点与规则（v0.5 已真实现）</b>：从提交开始计时；等审批期间暂停、处理完后重新计时；本轮手动收起过则本轮不再升级', tag: '§5 · v0.3' },
+    { ui: '<b>bash 是命令级闸门（D-06 已拍板）</b>：批准一次 = 整条命令放行，命令内部的写入不再二次进闸门，但全记审计日志', tag: 'D-06' }
+  ];
+
+  /* ======================= 工具函数 ======================= */
+  function esc(s){
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function toast(msg){
+    var el = $('#toastEl');
+    if (!el){
+      el = document.createElement('div');
+      el.className = 'toast';
+      el.id = 'toastEl';
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    if (state.toastTimer) clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(function(){ if (el && el.parentNode) el.remove(); }, 2600);
+  }
+
+  function scrollMiniBottom(){
+    var b = $('#miniBody');
+    if (b) b.scrollTop = b.scrollHeight;
+  }
+
+  var BALL_CAPTION = { idle: '空闲', thinking: '思考中', unread: '未读', await: '待确认' };
+
+  /* ======================= 渲染：小窗主体 ======================= */
+  function codeBlockHTML(id, lang, code){
+    return '<div class="codeblock" data-code="' + id + '">' +
+      '<div class="codeblock__bar"><span class="codeblock__lang">' + esc(lang) + '</span>' +
+      '<button class="btn btn--ghost btn--sm" type="button" data-copy>' + '</button>' +
+      '</div><pre><code>' + esc(code) + '</code></pre></div>';
+  }
+
+  function copyBtnLabel(){ return '复制'; }
+
+  function userBubbleHTML(text){
+    return '<div class="msg msg--user"><div class="bubble">' + esc(text) + '</div></div>';
+  }
+
+  function piHeadHTML(){
+    return '<div class="pihead"><span class="piavatar" aria-hidden="true">π</span><span>Pi</span>' +
+      '<span class="chip chip--speed" style="margin-left:4px">' + esc(state.scene) + '</span></div>';
+  }
+
+  function emptyHTML(){
+    return '<div class="msg msg--pi"><div class="pihead"><span class="piavatar" aria-hidden="true">π</span><span>Pi</span></div>' +
+      '<div class="pibody"><p><strong>还没有对话。</strong></p>' +
+      '<p>在任意 App 里选中一段文字，按 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd> 直接提问；' +
+      '或按 <kbd>Alt</kbd>+<kbd>Space</kbd> 唤起小窗后手动输入。</p>' +
+      '<p style="color:#8b949e">当前场景 ' + esc(state.scene) + '，cwd <code>' + esc(SCENES[state.scene].cwd) + '</code>，' +
+      '工具：' + esc(SCENES[state.scene].tools) + '。</p></div></div>';
+  }
+
+  function loadingHTML(){
+    return userBubbleHTML(state.userText || '这段梯度推导里为什么能把二阶项丢掉？') +
+      '<div class="msg msg--pi">' + piHeadHTML() +
+      '<div class="pibody"><div class="pulse" aria-hidden="true"><span></span><span></span><span></span></div>' +
+      '<p class="pulsetext">正在连接 Pi 会话…（已等待超过 3 秒）</p>' +
+      '<p style="color:#8b949e;font-size:11.5px">仍在等待首批事件（seq 未到）。超过 8 秒会自动升级为大窗并露出工具时间线，' +
+      '不会只转圈（§5）。</p></div></div>';
+  }
+
+  function errorHTML(){
+    return userBubbleHTML(state.userText || '这段梯度推导里为什么能把二阶项丢掉？') +
+      '<div class="msg msg--pi">' + piHeadHTML() +
+      '<div class="pibody" style="border-color:rgba(248,81,73,.5);background:rgba(248,81,73,.08)">' +
+      '<p style="color:#ff9d96;font-weight:600">连接失败：bridge 未响应（主进程未就绪 / 会话初始化失败）</p>' +
+      '<p style="font-size:11.5px;color:#b9c5d1">已重试 2 次。你的输入没有丢失，仍在本地队列里。</p>' +
+      '<p style="font-size:11.5px;color:#8b949e">可能原因：Pi 会话创建失败 / 上一次 turn 仍在收尾。' +
+      '这次失败已写入审计日志（§9 审批与执行都留痕）。</p>' +
+      '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
+      '<button class="btn btn--primary btn--sm" type="button" data-retry>重试</button>' +
+      '<button class="btn btn--sm" type="button" data-act="copyerr">复制错误详情</button>' +
+      '<button class="btn btn--ghost btn--sm" type="button" data-act="newsession">另起新会话</button>' +
+      '</div></div></div>';
+  }
+
+  function miniBodyHTML(){
+    if (state.boundary === 'empty') return emptyHTML();
+    if (state.boundary === 'loading') return loadingHTML();
+    if (state.boundary === 'error') return errorHTML();
+
+    var q = state.userText || '这段梯度推导里为什么能把二阶项丢掉？';
+    var head = userBubbleHTML(q);
+    var pi = piHeadHTML();
+
+    switch (state.level){
+      case 0:
+        return head +
+          '<div class="msg msg--pi">' + pi +
+          '<div class="pibody"><div class="pulse" aria-hidden="true"><span></span><span></span><span></span></div>' +
+          '<p class="pulsetext">Pi 正在思考…（0–300ms 先给反馈，不等首字）</p></div></div>';
+
+      case 1:
+        /* 投影 state.streamText：重建 DOM 也不会丢已渲染内容，更不会从头重放（P1-4） */
+        return head +
+          '<div class="msg msg--pi">' + pi +
+          '<div class="pibody"><p><span id="streamOut">' + esc(state.streamText) + '</span>' +
+          '<span class="caret" aria-hidden="true"' + (state.streamEnded ? ' hidden' : '') + '></span></p>' +
+          '<div id="streamCodeWrap"' + (state.streamEnded ? '' : ' hidden') + '>' +
+          codeBlockHTML('ans1', 'python', ANSWER_CODE) + '</div>' +
+          '</div></div>';
+
+      case 2:
+        return head +
+          '<div class="msg msg--pi">' + pi +
+          '<div class="pibody">' +
+          '<button class="tooline" type="button" id="toolToggle" aria-expanded="false">' +
+          '<span class="gear" aria-hidden="true">⚙</span><code>read</code>' +
+          '<span class="tooline__path">~/minipi/study/lecture03.md</span>' +
+          '<span class="tooline__chev">详情 ▾</span></button>' +
+          '<div class="toolDetail" id="toolDetail" hidden>' +
+          '参数：<code>{ "path": "~/minipi/study/lecture03.md", "offset": 1, "limit": 60 }</code><br>' +
+          '状态：执行中 · 已读 1.2 KB · 用时 42 ms<br>' +
+          'cwd：<code>~/minipi/study</code>（场景 study 的 read 为 allow，不弹审批卡）' +
+          '</div>' +
+          '<p class="pulsetext" style="margin-top:8px">工具执行期间小窗不卡死：一行紧凑状态 + 可展开详情（§4.1 实现要求 3）。</p>' +
+          '</div></div>';
+
+      case 3:
+        return head +
+          '<div class="msg msg--pi">' + pi +
+          '<div class="pibody">' +
+          '<p>我读完了 <code>src/train.py</code>：第 60 行那句「higher-order terms are negligible」漏了前提——只有 α→0 且 L 二阶连续可导时才成立。我准备把这行注释补准。</p>' +
+          '<button class="tooline" type="button" data-approval="edit">' +
+          '<span aria-hidden="true">⚠</span><code>edit</code>' +
+          '<span class="tooline__path">D:\\proj\\demo\\src\\train.py · 等待你确认</span>' +
+          '<span class="tooline__chev">展开 ▸</span></button>' +
+          '<p class="pulsetext" style="margin-top:8px">审批挂在 session 上：现在按 Esc 收起小窗，再打开时它仍在这里等你决定。' +
+          '5 分钟未处理 → 默认拒绝，绝不放行（§3.3 失败模式 2）。</p>' +
+          '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
+          '<button class="btn btn--warn btn--sm" type="button" data-mode="ball">收起到球，看「待确认」标记</button>' +
+          '</div>' +
+          '</div></div>';
+
+      case 4:
+        return head +
+          '<div class="msg msg--pi">' + pi +
+          '<div class="pibody"><p>任务已超过 8 秒，已自动升级为大窗，工具时间线与进度都在大窗里（此视图在升级后隐含）。</p>' +
+          '<p style="color:#8b949e;font-size:11.5px">球不再闪烁；决定权没交给用户，是系统按乐观前置原则替你展开的（§5）。</p></div></div>';
+
+      case 5:
+        return head +
+          '<div class="msg msg--pi">' + pi +
+          '<div class="pibody">' +
+          '<p>' + esc(ANSWER_TEXT) + '</p>' +
+          codeBlockHTML('ans2', 'python', ANSWER_CODE) +
+          '<p style="font-size:11.5px;color:#8b949e;margin-top:8px">' +
+          '本轮耗时 14.2 s · 工具调用 3 次 · 本次成本 $0.0412。</p>' +
+          '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
+          '<button class="btn btn--sm" type="button" data-mode="ball">收起到球，看「未读」小圆点</button>' +
+          '</div>' +
+          '<label class="batch__item" style="margin-top:8px">' +
+          '<input type="checkbox" id="notifyToggle"' + (state.notify ? ' checked' : '') + '>' +
+          '<span class="batch__text">值得打扰 → 发系统通知（interrupt ≥ 0.35）</span></label>' +
+          '</div></div>';
+
+      case 6:
+        return head +
+          '<div class="msg msg--pi">' + pi +
+          '<div class="pibody" style="border-color:rgba(248,81,73,.5);background:rgba(248,81,73,.08)">' +
+          '<p style="color:#ff9d96;font-weight:600">已中断：你在工具执行期间点了「中断」</p>' +
+          '<p style="font-size:11.5px;color:#b9c5d1">已完成的部分回答保留在会话里（seq 已落盘），不会丢。</p>' +
+          '<p style="font-size:11.5px;color:#8b949e">未决的 1 个审批已标记为「已失效，需重新发起」，不会一直挂着（§3.3 失败模式 3）。</p>' +
+          '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
+          '<button class="btn btn--primary btn--sm" type="button" data-retry>重试这一步</button>' +
+          '<button class="btn btn--sm" type="button" data-action="newsession">新会话</button>' +
+          '<button class="btn btn--ghost btn--sm" type="button" data-act="openfull">查看大窗时间线</button>' +
+          '</div></div></div>';
+
+      default:
+        return head;
+    }
+  }
+
+  /* ======================= 渲染：大窗会话树 ======================= */
+  function approvalInlineHTML(){
+    return '<div class="seg__label">工具调用 · 审批闸门 <span class="chip chip--tool">edit</span>' +
+      '<span class="chip chip--work">场景 work</span></div>' +
+      '<div class="toolcard toolcard--approval"><div style="padding:10px">' + cardShell({
+        tool: 'edit',
+        title: '修改 src/train.py（等待你确认）',
+        cwd: 'D:\\proj\\demo',
+        body: diffHTML(),
+        actions: approvalActionsHTML()
+      }) + '</div></div>';
+  }
+
+  function fullTreeHTML(){
+    var q = state.userText || '这段梯度推导里为什么能把二阶项丢掉？';
+
+    var html = '';
+    html += '<div class="seg"><div class="toolcard"><div class="toolcard__body">' +
+      '示例会话为 <b style="color:#8fdda0">work</b> 场景（cwd <code>D:\\proj\\demo</code>）：' +
+      '按 §3.2，只有 work 同时具备 <code>edit</code> 与 <code>bash</code>；' +
+      'study 只有 read/write/grep/find/ls，speed 完全没有工具。' +
+      '</div></div></div>';
+    html += '<div class="seg"><div class="seg__label">用户 · 带着选区一起入队</div>' +
+      '<div class="msg msg--user"><div class="bubble">' + esc(q) + '</div></div></div>';
+
+    html += '<div class="seg"><div class="seg__label">思考段【原型自加：只在大窗露出】</div>' +
+      '<div class="thinkbox"><button class="thinkbox__head" type="button" id="thinkToggle" aria-expanded="true">' +
+      '<span aria-hidden="true">▾</span> 思考 12 秒 · thinkingLevel=medium' +
+      '<span class="chip">reasoning 摘要</span></button>' +
+      '<div class="thinkbox__body" id="thinkBody">' +
+      '选区来自 lecture03.pdf 第 7 页的一阶泰勒展开段落；用户问的是「为什么能丢掉二阶项」。' +
+      '回答需要说清前提（α→0 且 L 二阶连续可导），并给出反例，否则只是复述课本。' +
+      '顺手发现用户项目的 <code>D:\\proj\\demo\\src\\train.py:60</code> 有同样的漏前提注释，准备一并修正。' +
+      '</div></div></div>';
+
+    html += '<div class="seg"><div class="seg__label">工具调用卡片 · 只读不弹卡</div>' +
+      '<div class="toolcard"><div class="toolcard__head"><span class="chip chip--tool">read</span>' +
+      '<span class="toolcard__path">D:\\proj\\demo\\src\\train.py</span>' +
+      '<span class="toolcard__st">完成 · 42ms</span></div>' +
+      '<div class="toolcard__body">offset 1, limit 60 · cwd <code>D:\\proj\\demo</code> · 命中 1 处「negligible」</div></div>' +
+      '<div class="toolcard" style="margin-top:8px"><div class="toolcard__head"><span class="chip chip--tool">grep</span>' +
+      '<span class="toolcard__path">higher-order D:\\proj\\demo\\</span>' +
+      '<span class="toolcard__st">完成 · 27ms</span></div>' +
+      '<div class="toolcard__body">3 个文件命中 · 只读工具默认 allow，同一 turn 内连续的只读调用不弹卡（§3.3 节奏控制）</div></div></div>';
+
+    if (state.level === 3){
+      html += '<div class="seg">' + approvalInlineHTML() + '</div>';
+    } else {
+      html += '<div class="seg"><div class="seg__label">写操作 · 会弹审批卡（当前未触发）</div>' +
+        '<div class="toolcard"><div class="toolcard__head"><span class="chip chip--tool">edit</span>' +
+        '<span class="toolcard__path">D:\\proj\\demo\\src\\train.py</span>' +
+        '<span class="toolcard__st" style="color:#8b949e">等待写操作</span></div>' +
+        '<div class="toolcard__body">切到状态条第 3 级「等待审批」，审批卡会渲染在这个位置（大窗下不需要另开面板）。</div></div></div>';
+    }
+
+    html += '<div class="seg"><div class="seg__label">Pi 回答</div>' +
+      '<div class="msg msg--pi">' + piHeadHTML() +
+      '<div class="pibody" style="max-width:100%"><p>' + esc(ANSWER_TEXT) + '</p>' +
+      codeBlockHTML('ansfull', 'python', ANSWER_CODE) + '</div></div></div>';
+
+    html += '<div class="seg"><div class="seg__label">本轮成本</div>' +
+      '<div class="toolcard"><div class="toolcard__body">输入 9,204 tokens · 输出 3,276 tokens · 合计 12,480 tokens · ' +
+      '预估 <b style="color:#8fdda0">$0.0412</b> · 工具调用 3 次 · 耗时 14.2s</div></div></div>';
+
+    return html;
+  }
+
+  /* ======================= 审批卡 HTML ======================= */
+  /* D-05（已拍板）：§3.3 的闸门只有三个 outcome —— approved / denied / aborted（中断整轮）。
+     审批卡动作固定「允许一次 / 拒绝 / 中断整轮」。
+     「本会话总是允许」已降为设置项、默认关；前缀匹配规则待定，不属于这组 outcome。 */
+  function approvalActionsHTML(){
+    var html =
+      '<button class="btn btn--primary btn--sm" type="button" data-approve="once" title="outcome: approved —— return undefined，放行本次调用">允许一次</button>' +
+      '<button class="btn btn--danger btn--sm" type="button" data-approve="deny" title="outcome: denied —— return { block: true, reason }，回一条 tool result">拒绝</button>' +
+      '<button class="btn btn--warn btn--sm" type="button" data-approve="abort" title="outcome: aborted —— return { block: true, reason, terminate: true }">中断整轮</button>';
+    if (state.alwaysAllow){
+      html += '<button class="btn btn--ghost btn--sm" type="button" data-approve="always" title="已拍板 D-05：降为设置项、默认关；前缀匹配规则待定。此项不是 §3.3 的 outcome">本会话总是允许</button>';
+    }
+    return html;
+  }
+
+  function diffHTML(){
+    var rows = DIFF_ROWS.map(function(r){
+      if (r.t === 'hunk'){
+        return '<div class="drow drow--hunk"><span class="dn"></span><span class="dn"></span>' +
+          '<span class="dsym"></span><span class="dtext">' + esc(r.text) + '</span></div>';
+      }
+      var sym = r.t === 'add' ? '+' : (r.t === 'del' ? '−' : ' ');
+      return '<div class="drow drow--' + r.t + '">' +
+        '<span class="dn">' + esc(r.on || '') + '</span>' +
+        '<span class="dn">' + esc(r.nn || '') + '</span>' +
+        '<span class="dsym">' + sym + '</span>' +
+        '<span class="dtext">' + esc(r.text) + '</span></div>';
+    }).join('');
+    return '<div class="diff" role="figure" aria-label="unified diff：删除行红色、新增行绿色">' + rows + '</div>';
+  }
+
+  function denyNoteHTML(){
+    return '<div class="denynote"><b>点「拒绝」之后模型收到什么？</b>不是异常、也不是空结果，而是一条 tool result：' +
+      '<code>The user denied this action. Do not retry it; ask what to do instead.</code>' +
+      '所以模型不会换个姿势反复重试同一条命令、把审批卡刷屏，而是改为询问你想怎么做。（§3.3 第 3 点）</div>' +
+      '<div class="denynote" style="background:rgba(227,179,65,.09);border-color:rgba(227,179,65,.45)">' +
+      '<b>点「中断整轮」呢？</b>对应钩子返回 <code>{ block: true, reason, terminate: true }</code>（<b>不是</b>抛异常）。' +
+      '注意官方语义更严：<b><code>terminate</code> 需同批所有被阻断结果都为 <code>true</code> 才提前终止</b>——' +
+      '所以点「中断整轮」时，minipi 必须把该决定<b>传播给同批其余 pending 审批</b>，否则会退化成普通「拒绝」。（§3.3 第 5 点）</div>';
+  }
+
+  function cardShell(o){
+    return '<article class="acard" role="group" aria-label="审批卡：' + esc(o.tool) + '">' +
+      '<header class="acard__head">' +
+        '<span class="chip chip--tool">' + esc(o.tool) + '</span>' +
+        '<span class="acard__title">' + esc(o.title) + '</span>' +
+        (o.scene ? '<span class="chip chip--' + o.scene + '">场景 ' + o.scene + '</span>' : '') +
+        '<span class="chip chip--cwd">cwd: ' + esc(o.cwd) + '</span>' +
+      '</header>' +
+      '<div class="acard__body">' + o.body + denyNoteHTML() + '</div>' +
+      '<footer class="acard__foot">' +
+        (o.footNote ? '<p class="acard__semantic">' + o.footNote + '</p>' : '') +
+        (o.actions || '') +
+        '<span class="acard__timer">5 分钟未决定 → 默认拒绝（不放行）</span>' +
+      '</footer></article>';
+  }
+
+  function approvalCardHTML(kind){
+    if (kind === 'edit'){
+      var body =
+        '<div class="wmeta">目标：<code>D:\\proj\\demo\\src\\train.py</code>' +
+        '<span class="chip chip--over">覆盖既有文件</span>' +
+        '<span>变更：−1 行 / +2 行</span></div>' +
+        diffHTML() +
+        '<div class="wmeta" style="color:#8b949e">diff <b>在放行前由 <code>params</code>（old/new 文本）自算</b>，不依赖执行期的 <code>details.patch</code>（§3.3 展示 1 / C17）。' +
+        '注意：<code>edit</code> 只在 work 场景存在——§3.2 里 study 的工具集是 read/write/grep/find/ls，不含 edit；因此 M4「看真实 diff」的验收场景定为 <b>work</b>（C6，v0.3 已定）。</div>';
+      return cardShell({
+        tool: 'edit', title: '修改 src/train.py', cwd: 'D:\\proj\\demo', scene: 'work',
+        body: body,
+        actions: approvalActionsHTML()
+      });
+    }
+
+    if (kind === 'write'){
+      var first = WRITE_LINES.map(function(l, i){
+        return '<span class="dn" style="color:#8b949e">' + (i + 1) + '</span>  ' + esc(l);
+      }).join('\n');
+      var more = WRITE_MORE.map(function(l, i){
+        return '<span class="dn" style="color:#8b949e">' + (i + 7) + '</span>  ' + esc(l);
+      }).join('\n');
+      var body2 =
+        '<div class="wmeta">目标：<code>~/minipi/study/notes/gradient.md</code>' +
+        '<span class="chip chip--new">新建</span>' +
+        '<span>编码 utf-8</span>' +
+        '<span>总行数 <b>42</b></span>' +
+        '<span>覆盖既有文件：<b>否</b></span></div>' +
+        '<div class="codeblock"><div class="codeblock__bar"><span class="codeblock__lang">markdown · 内容前 6 行（共 42 行）</span>' +
+        '<button class="btn btn--ghost btn--sm" type="button" id="writeToggle" aria-expanded="false">展开更多</button></div>' +
+        '<pre><code id="writePre">' + first + '</code></pre>' +
+        '<pre hidden id="writeMore" style="border-top:1px dashed #2c3742"><code>' + more +
+        '\n<span style="color:#8b949e">…（其余 30 行省略，实现时应可滚动查看全文或按需拉取）</span></code></pre></div>' +
+        '<div class="wmeta" style="color:#8b949e">write 卡片必须给出「新建还是覆盖」——覆盖是破坏性动作，用户需要一眼看到（§3.3 展示 2）。</div>';
+      return cardShell({
+        tool: 'write', title: '写入 notes/gradient.md', cwd: '~/minipi/study', scene: 'study',
+        body: body2,
+        actions: approvalActionsHTML()
+      });
+    }
+
+    if (kind === 'bash'){
+      var body3 =
+        '<div class="wmeta">完整命令原文（不截断、不折叠、不换行折叠）：</div>' +
+        '<div class="bcmd"><code>' + BASH_CMD_HTML + '</code></div>' +
+        '<div class="bchips">检测到的危险形状：' +
+        '<span class="wchip">rm -rf</span>' +
+        '<span class="wchip">git push --force</span>' +
+        '<span class="wchip">&gt; 重定向</span>' +
+        '<span class="wchip">curl … | sh</span>' +
+        '<span class="wchip">; / &amp;&amp; 串联</span></div>' +
+        '<div class="wmeta" style="color:#8b949e">cwd 必须与命令一起显示，否则「rm -rf ./build」到底删哪里无法判断。' +
+        '不做「安全命令白名单」：一个字符（<code>&gt;</code>、<code>;</code>、<code>$(…)</code>、管道）就能改变整条命令的性质（§3.3 展示 3）。</div>' +
+        '<div class="acard__semantic"><b>已拍板 D-06：闸门为「命令级」</b>——批准一次 = 批准<b>整条命令</b>；' +
+        '命令<b>内部</b>的写操作（<code>;</code>、<code>&amp;&amp;</code>、<code>| sh</code>、<code>$(…)</code>、脚本再写文件、子进程）' +
+        '<b>不再二次进闸门</b>，但<b>全记审计日志</b>（完整命令原文 / cwd / 决定 / 决定者）。这是明确取舍，不是隐藏漏洞。</div>';
+      return cardShell({
+        tool: 'bash', title: '执行 shell 命令（含危险形状）', cwd: 'D:\\proj\\demo', scene: 'work',
+        body: body3,
+        actions: approvalActionsHTML()
+      });
+    }
+
+    if (kind === 'batch'){
+      var items = BATCH_OPS.map(function(op, i){
+        return '<label class="batch__item">' +
+          '<input type="checkbox" data-bi="' + i + '"' + (op.checked ? ' checked' : '') + '>' +
+          '<span class="chip chip--tool">' + esc(op.tool) + '</span>' +
+          '<span class="batch__text">' + op.text + '</span></label>';
+      }).join('');
+      var body4 =
+        '<div class="batch">' +
+        '<div class="batch__lead">本 turn 想执行以下 <b>3</b> 个操作 —— 已合并成一张卡，而不是弹 3 次（§3.3 节奏控制）</div>' +
+        items +
+        '</div>' +
+        '<div class="wmeta" style="color:#8b949e">全部在一个 turn 内提出：逐个勾选给你粒度，同时避免「一次任务弹十次卡」。' +
+        '勾选只影响「<b>允许一次</b>」的放行范围：<b>未勾选项按「拒绝」处理</b>，同样回一条「不要重试」的 tool result（非默认放行）。' +
+        '合并单位是 <code>turn</code>，闸门按 <code>toolCallId</code> 建 pending 集合（§3.3 节奏控制）。</div>';
+      return cardShell({
+        tool: 'edit + write + bash', title: '合并审批：本 turn 的 3 个写 / 执行操作', cwd: 'D:\\proj\\demo', scene: 'work',
+        body: body4,
+        footNote: '<b>D-05：动作固定三个</b>——「允许一次」放行勾选项（未勾选项按拒绝）、「拒绝」整批拒绝、「中断整轮」走 <code>terminate: true</code>。' +
+          '未勾选项同样回一条「不要重试、问用户想怎么做」的 tool result（非默认放行）。',
+        actions: '<button class="btn btn--primary btn--sm" type="button" data-approve="once" title="outcome: approved —— 放行勾选项；未勾选项按拒绝处理">允许一次</button>' +
+          '<button class="btn btn--danger btn--sm" type="button" data-approve="deny" title="outcome: denied —— 整批拒绝，全部回一条 tool result">拒绝</button>' +
+          '<button class="btn btn--warn btn--sm" type="button" data-approve="abort" title="outcome: aborted —— return { block:true, reason, terminate:true }；须传播给同批其余 pending 审批">中断整轮</button>' +
+          (state.alwaysAllow ? '<button class="btn btn--ghost btn--sm" type="button" data-approve="always" title="已拍板 D-05：降为设置项、默认关；前缀匹配规则待定。此项不是 §3.3 的 outcome">本会话总是允许</button>' : '')
+      });
+    }
+    return '<p class="drawer__note">请选择一个示例。</p>';
+  }
+
+  /* ======================= 渲染主入口 ======================= */
+  function render(){
+    /* 形态（P1-4：只切可见性，不重建窗口内部 DOM） */
+    applyMode();
+
+    /* 球 */
+    $('#ballwrap').setAttribute('data-ball', state.ball);
+    $('#ballCaption').textContent = BALL_CAPTION[state.ball];
+    $('#ball').setAttribute('aria-label', 'minipi 悬浮球，当前状态：' + BALL_CAPTION[state.ball] + '。按 Enter 打开小窗');
+    $$('[data-ball]').forEach(function(b){
+      if (b.tagName === 'BUTTON' && b.classList.contains('ballpick__item')){
+        b.setAttribute('aria-pressed', String(b.getAttribute('data-ball') === state.ball));
+      }
+    });
+
+    /* 场景 */
+    var sc = SCENES[state.scene];
+    $('#miniScene').textContent = state.scene;
+    $('#sceneTable').innerHTML =
+      '<div class="scenerow"><dt>cwd</dt><dd><code>' + esc(sc.cwd) + '</code></dd></div>' +
+      '<div class="scenerow"><dt>工具</dt><dd>' + esc(sc.tools) + '</dd></div>' +
+      '<div class="scenerow"><dt>会话</dt><dd>' + esc(sc.session) + '</dd></div>' +
+      '<div class="scenerow"><dt>权限</dt><dd>' + esc(sc.perm) + '</dd></div>';
+    $('#sceneNote').innerHTML = sc.note;
+    $$('[data-scene]').forEach(function(b){
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-scene') === state.scene));
+    });
+
+    /* 横幅：只在「等待审批」且没有边界状态覆盖时出现 */
+    $('#miniBanner').hidden = !(state.level === 3 && !state.boundary);
+    $('#bannerText').textContent = '⚠ 等待你确认 1 个操作';
+
+    /* 小窗主体 */
+    $('#miniBody').innerHTML = miniBodyHTML();
+
+    /* 大窗 */
+    $('#fullSub').textContent = '会话 s_abc · ' + state.scene + ' · 同一份事件日志（seq 续传，切形态不重连）';
+    $('#fullTree').innerHTML = fullTreeHTML();
+
+    /* 状态条 */
+    $$('#steps .step').forEach(function(b){
+      b.setAttribute('aria-pressed', String(Number(b.getAttribute('data-step')) === state.level));
+    });
+    var cur = STEPS[state.level];
+    $('#stageNote').textContent = cur ? cur.note : '';
+    $('#stageNote').title = cur ? cur.note : '';
+
+    /* §5 计时器状态行 */
+    paintUpgrade();
+
+    /* 边界按钮选中态 */
+    $$('[data-boundary]').forEach(function(b){
+      var v = b.getAttribute('data-boundary');
+      b.setAttribute('aria-pressed', String((v === 'none' && !state.boundary) || v === state.boundary));
+    });
+
+    /* 通知 */
+    $('#sysnotify').hidden = !(state.notify && state.level === 5);
+
+    /* 审批面板 */
+    var open = !!state.approval;
+    $('#drawer').hidden = !open;
+    if (open){
+      $('#drawerBody').innerHTML = approvalCardHTML(state.approval) +
+        '<p class="drawer__note"><b>闸门位置（v0.3 方向变更）</b>：不在渲染进程（可被绕过），' +
+        '也不在自建的工具包装层，' +
+        '而是用 Pi 官方的 <code>pi.on("tool_call")</code> <b>前置钩子</b>：' +
+        'bridge 以内联扩展注册它，每次工具调用<b>执行前</b>统一触发，返回 ' +
+        '<code>undefined</code>（放行）/ <code>{ block:true, reason }</code>（拒绝）/ ' +
+        '<code>{ block:true, reason, terminate:true }</code>（中断整轮）。<br>' +
+        '<b>审批入口</b>：官方示例用的是 <code>ctx.ui.select(...)</code>，minipi 没有终端 UI，' +
+        '换成 <b>bridge 的 WS 审批推送</b>（<code>approval_requested</code> / <code>approval_resolved</code> 与 Pi 事件同流）；' +
+        '闸门<b>不</b>用 <code>ctx.hasUI</code> 当开关（它默认 false），以「bridge 是否可达」为准，' +
+        '不可达就一律阻断，<b>绝不静默放行</b>。<br>' +
+        '<b>场景约束</b>：<code>edit</code> 与 <code>bash</code> 只存在于 work 场景，因此这两张示例卡的 cwd 是 <code>D:\\proj\\demo</code>；' +
+        '<code>write</code> 属于 study。§3.2 的 study 工具集是 read/write/grep/find/ls（不含 edit），' +
+        '因此 M4「看真实 diff」的验收场景定为 <b>work</b>（C6，v0.3 已定）。</p>';
+    }
+    $$('[data-approval]').forEach(function(b){
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-approval') === state.approval));
+    });
+
+    /* 审批后处理：只读工具的初次尝试（工具名可能不存在时也安全） */
+    var copyBtns = $$('[data-copy]');
+    copyBtns.forEach(function(b){ b.textContent = copyBtnLabel(); });
+
+    bindInner();
+  }
+
+  /* ======================= 局部事件绑定（每次重渲染后） ======================= */
+  function bindInner(){
+    var toolToggle = $('#toolToggle');
+    if (toolToggle){
+      toolToggle.addEventListener('click', function(){
+        var d = $('#toolDetail');
+        var expanded = toolToggle.getAttribute('aria-expanded') === 'true';
+        toolToggle.setAttribute('aria-expanded', String(!expanded));
+        d.hidden = expanded;
+        toolToggle.querySelector('.tooline__chev').textContent = expanded ? '详情 ▾' : '收起 ▴';
+      });
+    }
+
+    var thinkToggle = $('#thinkToggle');
+    if (thinkToggle){
+      thinkToggle.addEventListener('click', function(){
+        var body = $('#thinkBody');
+        var expanded = thinkToggle.getAttribute('aria-expanded') === 'true';
+        thinkToggle.setAttribute('aria-expanded', String(!expanded));
+        body.hidden = expanded;
+        thinkToggle.firstElementChild.textContent = expanded ? '▸' : '▾';
+      });
+    }
+
+    var writeToggle = $('#writeToggle');
+    if (writeToggle){
+      writeToggle.addEventListener('click', function(){
+        var more = $('#writeMore');
+        var expanded = writeToggle.getAttribute('aria-expanded') === 'true';
+        writeToggle.setAttribute('aria-expanded', String(!expanded));
+        more.hidden = expanded;
+        writeToggle.textContent = expanded ? '展开更多' : '收起';
+      });
+    }
+
+    var notifyToggle = $('#notifyToggle');
+    if (notifyToggle){
+      notifyToggle.addEventListener('change', function(){
+        state.notify = notifyToggle.checked;
+        $('#sysnotify').hidden = !(state.notify && state.level === 5);
+        if (state.notify) toast('已按 interrupt 判定发出系统通知');
+      });
+    }
+
+    /* 未聚焦标记：无 */
+    /* P1-4：DOM 重建后从 state.streamText 投影回来，并接着写（幂等） */
+    if (state.level === 1){ projectStream(); ensureStream(); }
+  }
+
+  /* ======================= 流式输出（P1-4：文本由 state 持有，render 只做投影） =======================
+     不变量（§4.1 实现要求 2 / §1 难点 1）：形态切换不重连、不清空、不重放。
+     - state.streamText 是唯一真源；任何 DOM 重建都从这里投影回来。
+     - ensureStream() 幂等：已在跑不重开，已写完不重放。
+     - setMode() 不再调 stopStream()，也不再重建 #miniBody。 */
+  function stopStream(){
+    if (state.streamTimer){ clearInterval(state.streamTimer); state.streamTimer = null; }
+    if (state.holdTimer){ clearTimeout(state.holdTimer); state.holdTimer = null; }
+  }
+
+  function resetStream(){
+    stopStream();
+    state.streamText = '';
+    state.streamIdx = 0;
+    state.streamEnded = false;
+  }
+
+  function projectStream(){
+    var out = $('#streamOut');
+    if (out){
+      if (out.textContent !== state.streamText) out.textContent = state.streamText;
+      var caret = out.parentNode ? out.parentNode.querySelector('.caret') : null;
+      if (caret) caret.hidden = state.streamEnded;
+    }
+    var wrap = $('#streamCodeWrap');
+    if (wrap) wrap.hidden = !state.streamEnded;
+    var b = $('#miniBody');
+    if (b && !$('#mini').hidden && b.scrollHeight - b.scrollTop - b.clientHeight < 60){
+      b.scrollTop = b.scrollHeight;
+    }
+  }
+
+  function tickStream(){
+    if (state.streamEnded) { stopStream(); return; }
+    state.streamIdx = Math.min(state.streamIdx + 2, ANSWER_TEXT.length);
+    state.streamText = ANSWER_TEXT.slice(0, state.streamIdx);
+    if (state.streamIdx >= ANSWER_TEXT.length) state.streamEnded = true;
+    projectStream();
+    if (state.streamEnded) stopStream();
+  }
+
+  function ensureStream(){
+    if (state.level !== 1 || state.boundary || state.streamEnded || state.streamTimer) return;
+    state.streamTimer = setInterval(tickStream, 22);
+  }
+
+  /* ================== §5 8s 自动升级（计时规则，v0.3 已真实现） ==================
+     规则一：处于「等审批」（第 3 级）期间，8s 自动升级计时器「暂停」；
+             审批被处理后「重新计时」（重置为 8s）。
+     规则二：本轮内被用户手动收起过，则本轮「不再自动升级」。
+     这两条不是文案 —— 下面是真实跑的计时器，状态会写进 #upgradeNote。 */
+  function beginTurn(){
+    state.turnActive = true;
+    state.collapsedThisTurn = false;
+    state.upgradeFired = false;
+    state.upgrade.remaining = UPGRADE_MS;
+    state.upgrade.last = Date.now();
+    state.upgrade.paused = false;
+    ensureUpgradeTimer();
+    paintUpgrade();
+  }
+
+  function endTurn(){
+    state.turnActive = false;
+    stopUpgradeTimer();
+    paintUpgrade();
+  }
+
+  /* 规则二：用户在本轮内手动收起过 → 本轮不再自动升级 */
+  function markCollapsed(){
+    if (!state.turnActive) return;
+    state.collapsedThisTurn = true;
+    paintUpgrade();
+  }
+
+  function ensureUpgradeTimer(){
+    if (!state.upgrade.timer) state.upgrade.timer = setInterval(tickUpgrade, 200);
+  }
+
+  function stopUpgradeTimer(){
+    if (state.upgrade.timer){ clearInterval(state.upgrade.timer); state.upgrade.timer = null; }
+  }
+
+  function tickUpgrade(){
+    if (!state.turnActive){ stopUpgradeTimer(); paintUpgrade(); return; }
+
+    /* 规则一：等审批期间计时器暂停（不减少 remaining，也不触发第 4 级） */
+    if (state.level === 3){
+      state.upgrade.paused = true;
+      state.upgrade.last = Date.now();
+      paintUpgrade();
+      return;
+    }
+
+    /* 规则二：本轮已手动收起过 → 计时器停用 */
+    if (state.collapsedThisTurn){ stopUpgradeTimer(); paintUpgrade(); return; }
+
+    /* 已经在大窗 / 已升级 → 无事可做 */
+    if (state.level >= 4){ stopUpgradeTimer(); paintUpgrade(); return; }
+
+    var now = Date.now();
+    if (state.upgrade.paused){
+      /* 离开第 3 级 → 「重新计时」：重置为完整 8s */
+      state.upgrade.paused = false;
+      state.upgrade.remaining = UPGRADE_MS;
+    }
+    state.upgrade.remaining -= (now - state.upgrade.last);
+    state.upgrade.last = now;
+
+    if (state.upgrade.remaining <= 0){ fireAutoUpgrade(); return; }
+    paintUpgrade();
+  }
+
+  function fireAutoUpgrade(){
+    state.upgrade.remaining = 0;
+    state.upgradeFired = true;
+    stopUpgradeTimer();
+    paintUpgrade();
+    setLevel(4);
+  }
+
+  /* 把计时器状态写出来 —— 评审与 QA 都靠这一行判读 */
+  function paintUpgrade(){
+    var el = $('#upgradeNote');
+    if (!el) return;
+    var s;
+    if (!state.turnActive){
+      s = '自动升级计时器：<b>未启动</b>（发一条提问，或点「开始一轮」即起表）';
+    } else if (state.collapsedThisTurn){
+      s = '自动升级计时器：<b>已停用</b> —— 本轮内你手动收起过，<b>本轮不再自动升级</b>（§5 规则二）';
+    } else if (state.level === 3){
+      s = '自动升级计时器：<b>已暂停</b> —— 处于「等审批」第 3 级期间不计时；审批处理完后<b>重新计时</b>（§5 规则一）';
+    } else if (state.upgradeFired || state.upgrade.remaining <= 0){
+      s = '自动升级计时器：<b>已触发</b> —— 已自动升级为大窗并提示「任务较久，已展开」（§5 第 4 级）';
+    } else {
+      s = '自动升级计时器：<b>计时中</b> 剩余 <b>' + (Math.max(0, state.upgrade.remaining) / 1000).toFixed(1) + 's</b> / 8s（起点 = 提交）';
+    }
+    el.innerHTML = s;
+  }
+
+  /* ======================= 交互：形态 / 场景 / 状态 ======================= */
+  /* 只切可见性，不重建任何窗口内部 DOM（P1-4） */
+  function applyMode(){
+    $('#ballwrap').hidden = state.mode !== 'ball';
+    $('#mini').hidden = state.mode !== 'mini';
+    $('#full').hidden = state.mode !== 'full';
+    $$('[data-mode]').forEach(function(b){
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-mode') === state.mode));
+    });
+  }
+
+  function setMode(m){
+    if (state.mode === m) return;
+    state.mode = m;
+    if (m === 'full' && state.approval) closeDrawer(false);
+    applyMode();
+    if (m === 'full') $('#fullTree').innerHTML = fullTreeHTML();
+    if (m === 'mini') scrollMiniBottom();
+    /* 形态切换后接着写：已渲染文本原样保留，长度单调不减 */
+    projectStream();
+    ensureStream();
+  }
+
+  function setBall(s){
+    state.ball = s;
+    state.mode = 'ball';
+    render();
+  }
+
+  function setScene(s){
+    state.scene = s;
+    render();
+    toast('已切到场景 ' + s + '（cwd 与工具权限随之变化）');
+  }
+
+  function setLevel(n){
+    state.level = n;
+    state.boundary = null;
+
+    /* 级别驱动球态（静默球语义） */
+    if (n <= 2) state.ball = 'thinking';
+    else if (n === 3) state.ball = 'await';
+    else if (n === 5) state.ball = 'unread';
+    else if (n === 6) state.ball = 'idle';
+
+    if (n === 4){
+      state.mode = 'full';
+      /* 升到大窗后，审批卡渲染在会话树里，独立面板让位给模型/成本/附件栏 */
+      closeDrawer(false);
+      toast('任务较久，已展开为大窗（超过 8s 自动升级，§5）');
+    } else if (n === 3){
+      if (!state.approval){ state.drawerReturnFocus = document.activeElement; }
+      state.approval = 'edit';
+      if (state.mode === 'full') state.mode = 'mini';
+      /* §5 规则一：进入第 3 级 → 8s 计时器暂停 */
+      state.upgrade.paused = true;
+      state.upgrade.last = Date.now();
+      toast('等待你确认 1 个操作：球变黄，不自动升级');
+    } else if (state.mode === 'full'){
+      /* 保持大窗 */
+    } else {
+      state.mode = 'mini';
+    }
+    if (n === 5 && state.notify) toast('回答完成 · 未读小圆点 + 系统通知');
+
+    /* 本轮结束（完成 / 失败中断）→ 停表 */
+    if (n === 5 || n === 6) endTurn();
+
+    /* P1-4：只在「不是流式级别」时暂停，绝不重置文本（重置只发生在 send / 边界态） */
+    if (n !== 1) stopStream();
+
+    render();
+    paintUpgrade();
+    if (n === 3) focusDrawer();
+  }
+
+  function setBoundary(v){
+    state.boundary = (v === 'none') ? null : v;
+    if (state.boundary){
+      stopStream();
+      resetStream();
+      state.mode = 'mini';
+      toast(v === 'empty' ? '空状态' : (v === 'loading' ? '加载中（超过 3 秒）' : '错误状态'));
+    }
+    render();
+  }
+
+  /* ======================= 审批抽屉（P3-6：dialog 语义 + 焦点管理） ======================= */
+  function focusDrawer(){
+    var d = $('#drawer');
+    if (!d || d.hidden) return;
+    try{ d.focus(); }catch(err){}
+  }
+
+  function closeDrawer(restoreFocus){
+    var wasOpen = !!state.approval;
+    state.approval = null;
+    $('#drawer').hidden = true;
+    $$('[data-approval]').forEach(function(b){ b.setAttribute('aria-pressed', 'false'); });
+    var rf = state.drawerReturnFocus;
+    state.drawerReturnFocus = null;
+    if (wasOpen && restoreFocus !== false && rf && rf.isConnected && !rf.hidden){
+      try{ rf.focus(); }catch(err){}
+    }
+  }
+
+  function openApproval(kind){
+    if (!state.approval) state.drawerReturnFocus = document.activeElement;
+    state.approval = kind;
+    if (state.mode === 'full') state.mode = 'mini';
+    render();
+    focusDrawer();
+  }
+
+  /* ======================= 拖动（§4.1：拖动移动并记忆位置） ======================= */
+  function makeDraggable(handleEl, targetEl, opts){
+    opts = opts || {};
+    var dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+
+    function onMove(e){
+      if (!dragging) return;
+      var dx = e.clientX - sx, dy = e.clientY - sy;
+      if (!moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) moved = true;
+      if (!moved) return;
+      var maxX = targetEl.offsetParent ? targetEl.offsetParent.clientWidth - targetEl.offsetWidth : 9999;
+      var maxY = targetEl.offsetParent ? targetEl.offsetParent.clientHeight - targetEl.offsetHeight : 9999;
+      var nx = Math.min(Math.max(0, ox + dx), Math.max(0, maxX));
+      var ny = Math.min(Math.max(0, oy + dy), Math.max(0, maxY));
+      targetEl.style.left = nx + 'px';
+      targetEl.style.top = ny + 'px';
+      targetEl.style.right = 'auto';
+      targetEl.style.bottom = 'auto';
+      targetEl.style.transform = 'none';
+    }
+
+    function onUp(){
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      if (moved){
+        state.justDragged = true;
+        setTimeout(function(){ state.justDragged = false; }, 0);
+        if (opts.onEnd) opts.onEnd();
+      }
+    }
+
+    handleEl.addEventListener('mousedown', function(e){
+      if (e.button !== 0) return;
+      if (opts.ignoreSelector && e.target.closest(opts.ignoreSelector)) return;
+      var r = targetEl.getBoundingClientRect();
+      var pr = targetEl.offsetParent ? targetEl.offsetParent.getBoundingClientRect() : { left: 0, top: 0 };
+      ox = r.left - pr.left;
+      oy = r.top - pr.top;
+      sx = e.clientX;
+      sy = e.clientY;
+      dragging = true;
+      moved = false;
+      document.body.style.userSelect = 'none';
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      e.preventDefault();
+    });
+  }
+
+  /* ======================= 事件绑定 ======================= */
+  document.addEventListener('click', function(e){
+    var t = e.target;
+    if (!t || !t.closest) return;
+
+    /* P2-2：点击菜单以外的任何区域关闭球右键菜单（菜单项自身的关闭在下方分支处理） */
+    if (!t.closest('#ballMenu')) closeBallMenu();
+
+    var modeBtn = t.closest('[data-mode]');
+    if (modeBtn){ setMode(modeBtn.getAttribute('data-mode')); return; }
+
+    var ballBtn = t.closest('.ballpick__item');
+    if (ballBtn){ setBall(ballBtn.getAttribute('data-ball')); return; }
+
+    var sceneBtn = t.closest('[data-scene]');
+    if (sceneBtn){ setScene(sceneBtn.getAttribute('data-scene')); return; }
+
+    var appr = t.closest('[data-approval]');
+    if (appr){ openApproval(appr.getAttribute('data-approval')); return; }
+
+    var bound = t.closest('[data-boundary]');
+    if (bound){ setBoundary(bound.getAttribute('data-boundary')); return; }
+
+    var step = t.closest('.step');
+    if (step){ setLevel(Number(step.getAttribute('data-step'))); return; }
+
+    var act = t.closest('[data-action]');
+    if (act){ doAction(act.getAttribute('data-action')); return; }
+
+    var bm = t.closest('[data-ballmenu]');
+    if (bm){
+      doBallMenu(bm.getAttribute('data-ballmenu'));
+      closeBallMenu();
+      var bb = $('#ball');
+      if (bb && state.mode === 'ball') bb.focus();
+      return;
+    }
+
+    var sess = t.closest('[data-sess]');
+    if (sess){
+      $$('.sess').forEach(function(s){ s.setAttribute('aria-pressed', 'false'); });
+      sess.setAttribute('aria-pressed', 'true');
+      toast('已切换会话（切换前需 await session.waitForIdle()，否则 navigateTree 会 reject，§3）');
+      return;
+    }
+
+    var think = t.closest('[data-think]');
+    if (think){
+      $$('[data-think]').forEach(function(b){ b.setAttribute('aria-pressed', String(b === think)); });
+      toast('思考等级 → ' + think.getAttribute('data-think'));
+      return;
+    }
+
+    if (t.closest('[data-attach]')){ toast('附件入口：文件 / 框选截图（base64 + mimeType，§4.2）'); return; }
+
+    /* 复制 */
+    var copy = t.closest('[data-copy]');
+    if (copy){
+      var box = copy.closest('.codeblock');
+      var code = box ? box.querySelector('code') : null;
+      var text = code ? code.textContent : '';
+      doCopy(text, copy);
+      return;
+    }
+
+    if (t.closest('[data-retry]')){
+      toast('重试中…（原型不发起真实请求）');
+      state.boundary = null;
+      setLevel(0);
+      return;
+    }
+
+    if (t.closest('[data-act="copyerr"]')){ doCopy('bridge 未响应（主进程未就绪 / 会话初始化失败）。sessionId=s_demo, lastSeq=1043', t.closest('button')); return; }
+    if (t.closest('[data-act="openfull"]')){ setMode('full'); return; }
+
+    var approve = t.closest('[data-approve]');
+    if (approve){
+      var kind = approve.getAttribute('data-approve');
+      if (kind === 'abort'){
+        /* §3.3 outcome = aborted：钩子返回 { block:true, reason, terminate:true } —— 中断整轮。
+           注意 terminate 的官方语义：需同批所有被阻断结果都为 true 才提前终止，
+           故该决定要传播给同批其余 pending 审批（§3.3 第 5 点）。 */
+        closeDrawer(true);
+        setLevel(6);
+        toast('中断整轮（aborted）：return { block:true, terminate:true }，并传播给同批其余 pending（§3.3）');
+        return;
+      }
+      var msg = {
+        once: '已允许一次（approved）：return undefined，放行这条调用；其余仍逐次确认',
+        deny: '已拒绝（denied）：return { block:true, reason }，回给模型「不要重试，问用户想怎么做」（§3.3）',
+        always: '「本会话总是允许」是设置项、默认关（D-05）：前缀匹配规则待定，暂不可用',
+        all: '全部允许（approved）：本批 3 个操作一起放行',
+        checked: '只允许勾选项：未勾选的按拒绝处理并回「不要重试」',
+        aborted: '中断整轮（aborted）'
+      }[kind] || '已处理';
+      toast(msg);
+      return;
+    }
+
+    /* 小窗 / 大窗按钮 */
+    if (t.closest('#btnEnlarge')){ setMode('full'); toast('已放大 · 流不中断（同一会话、同一 seq，不重连）'); return; }
+    if (t.closest('#btnCollapse')){
+      markCollapsed();  /* §5 规则二：本轮内手动收起过 → 本轮不再自动升级 */
+      setMode('mini');
+      toast('已收起 · 流不中断；本轮不再自动升级（§5 规则二）');
+      return;
+    }
+    if (t.closest('#btnMiniCollapse')){
+      markCollapsed();
+      state.mode = 'ball';
+      render();
+      toast('已收起 · 焦点归还到唤起前的窗口（窗口级；caret 恢复 best-effort，D-02）');
+      return;
+    }
+    if (t.closest('#btnTurn')){ startLongTurn(); return; }
+    if (t.closest('#btnAbort')){ stopStream(); setLevel(6); toast('已中断这一轮'); return; }
+    if (t.closest('#btnSend')){ send(); return; }
+    if (t.closest('#btnBannerExpand')){ openApproval(state.approval || 'edit'); toast('展开审批卡'); return; }
+    if (t.closest('#btnDrawerClose') || t.closest('#btnDrawerClose2')){ closeDrawer(true); return; }
+    if (t.closest('#btnPrev')){ setLevel(Math.max(0, state.level - 1)); return; }
+    if (t.closest('#btnNext')){ setLevel(Math.min(6, state.level + 1)); return; }
+    if (t.closest('#btnPlay')){ togglePlay(); return; }
+  });
+
+  function doCopy(text, btn){
+    if (!text){ toast('没有可复制的内容'); return; }
+    var isCopyBtn = btn && btn.hasAttribute && btn.hasAttribute('data-copy');
+    var flash = function(label){
+      if (!isCopyBtn){ toast(label); return; }
+      btn.textContent = label;
+      if (state.copyTimer) clearTimeout(state.copyTimer);
+      state.copyTimer = setTimeout(function(){
+        if (btn.parentNode) btn.textContent = '复制';
+      }, 2000);
+    };
+    var ok = function(){ flash(isCopyBtn ? '已复制' : '已复制到剪贴板'); };
+    var fail = function(){ flash('复制失败'); toast('复制失败：请手动选中复制'); };
+    var fallback = function(){
+      try{
+        if (typeof document.execCommand !== 'function') throw new Error('execCommand unavailable');
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', 'readonly');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        var done = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (!done) throw new Error('execCommand returned false');
+        ok();
+      }catch(err){
+        fail();
+      }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      try{
+        navigator.clipboard.writeText(text).then(ok, fallback);
+      }catch(err){
+        fallback();
+      }
+    } else {
+      fallback();
+    }
+  }
+
+  function doAction(kind){
+    var log = $('#actLog');
+    log.hidden = false;
+    if (kind === 'pin'){
+      state.scene = 'study';
+      log.innerHTML = '<b>钉住</b>：speed 的内存会话升级为持久 study 会话，cwd 由 <code>~/.minipi/scratch/&lt;date&gt;</code> 换成 <code>~/minipi/study</code>，工具从「无」变为 read/write/grep/find/ls（§3.2）。原型未定义后续：已有回复是否重放、是否要重新确认一次权限。';
+      render();
+      return;
+    }
+    if (kind === 'openproject'){
+      state.scene = 'work';
+      log.innerHTML = '<b>用这个项目打开</b>：切到 work 场景并把当前对话作为上下文带过去；cwd 需显式选择或自动识别，工具变为全量（bash/edit/write 全部弹审批卡）。原型未定义：cwd 是弹目录选择器还是取前台 IDE 的工作区？';
+      render();
+      return;
+    }
+    log.innerHTML = '<b>新会话</b>：新建 sessionId，seq 从 0 开始；按 §3 的做法要先 <code>unsubscribe()</code> → 从 <code>runtime.session</code> 重新 <code>subscribe</code>，否则旧订阅失效。原型未定义：旧会话是否自动归档到 speed、球上的未读小圆点是否清零。';
+  }
+
+  function doBallMenu(kind){
+    if (kind === 'new'){ doAction('newsession'); toast('新会话'); return; }
+    if (kind === 'hide30'){ toast('已隐藏 30 分钟（免打扰，§9 悬浮窗变骚扰的对策）'); return; }
+    if (kind === 'full'){ setMode('full'); return; }
+    if (kind === 'quit'){ toast('退出：会先等待未决审批按「已失效」落库，再收掉 bridge 进程'); return; }
+  }
+
+  function send(){
+    var input = $('#miniInput');
+    var v = input.value.trim();
+    if (!v){ toast('先输入点什么'); return; }
+    state.userText = v;
+    input.value = '';
+    state.boundary = null;
+    /* P1-4：只有「新提问」才允许清空重流；形态切换绝不走这里 */
+    resetStream();
+    setLevel(0);
+    /* §5：计时起点 = 提交；本轮开始 → 起 8s 自动升级表 */
+    beginTurn();
+    /* 0–300ms 思考脉冲之后进入流式；若期间用户切了级别/形态，这个延迟会被取消 */
+    state.holdTimer = setTimeout(function(){
+      state.holdTimer = null;
+      if (state.level === 0 && state.mode === 'mini') setLevel(1);
+    }, 300);
+  }
+
+  /* 「开始一轮」：与 send() 同一条路径，只是不需要手输文本。
+     存在的意义是让 §5 的两条计时规则可被真实观察 / 真实实测（见 #upgradeNote）。 */
+  function startLongTurn(){
+    if (state.mode === 'ball') state.mode = 'mini';
+    if (!state.userText) state.userText = '这段梯度推导里为什么能把二阶项丢掉？';
+    state.boundary = null;
+    resetStream();
+    setLevel(0);
+    beginTurn();
+    toast('已开始一轮：8s 自动升级计时器起表（见底部「自动升级计时器」一行）');
+    state.holdTimer = setTimeout(function(){
+      state.holdTimer = null;
+      if (state.level === 0 && state.mode === 'mini') setLevel(1);
+    }, 300);
+  }
+
+  /* ======================= 自动播放 ======================= */
+  function togglePlay(){
+    if (state.autoplay){
+      clearInterval(state.autoplay);
+      state.autoplay = null;
+      $('#btnPlay').textContent = '自动播放';
+      $('#btnPlay').setAttribute('aria-pressed', 'false');
+      return;
+    }
+    $('#btnPlay').textContent = '停止播放';
+    $('#btnPlay').setAttribute('aria-pressed', 'true');
+    setLevel(0);
+    state.autoplay = setInterval(function(){
+      var next = state.level + 1;
+      if (next > 6){
+        clearInterval(state.autoplay);
+        state.autoplay = null;
+        $('#btnPlay').textContent = '自动播放';
+        $('#btnPlay').setAttribute('aria-pressed', 'false');
+        return;
+      }
+      setLevel(next);
+    }, 2200);
+  }
+
+  /* ======================= 键盘 ======================= */
+  document.addEventListener('keydown', function(e){
+    if (e.altKey && e.code === 'Space'){
+      e.preventDefault();
+      if (state.mode === 'ball'){ state.mode = 'mini'; applyMode(); projectStream(); ensureStream(); }
+      else {
+        markCollapsed();  /* §5 规则二 */
+        state.mode = 'ball'; applyMode(); projectStream();
+        toast('已收起 · 焦点归还到唤起前的窗口（窗口级；caret 恢复 best-effort，D-02）');
+      }
+      return;
+    }
+    if (e.key === 'Escape'){
+      /* P2-2：先关右键菜单 */
+      if (closeBallMenu()){ e.preventDefault(); return; }
+      /* P3-6：审批抽屉是 aria-modal 对话框，Esc 关它并归还焦点 */
+      if (state.approval){ e.preventDefault(); closeDrawer(true); toast('已关闭审批卡'); return; }
+      if (state.mode === 'mini'){
+        e.preventDefault();
+        markCollapsed();  /* §5 规则二 */
+        state.mode = 'ball';
+        applyMode();
+        projectStream();
+        toast('Esc 收起 · 焦点归还到唤起前的窗口（窗口级；caret 恢复 best-effort，D-02）');
+      } else if (state.mode === 'full'){
+        e.preventDefault();
+        markCollapsed();  /* §5 规则二：本轮内手动收起过 → 本轮不再自动升级 */
+        setMode('mini');
+        toast('已收起 · 回答原样保留 ' + state.streamText.length + ' 字（不重放）；本轮不再自动升级');
+      }
+      return;
+    }
+    /* P3-6：焦点锁在抽屉内（aria-modal 的应有行为） */
+    if (e.key === 'Tab' && state.approval){
+      var f = $$('#drawer button, #drawer input, #drawer select, #drawer textarea, #drawer a[href], #drawer [tabindex]:not([tabindex="-1"])')
+        .filter(function(el){ return !el.disabled && el.offsetParent !== null; });
+      if (!f.length) return;
+      var first = f[0], last = f[f.length - 1], act = document.activeElement;
+      if (e.shiftKey && (act === first || act === $('#drawer'))){
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && (act === last || !$('#drawer').contains(act))){
+        e.preventDefault(); first.focus();
+      }
+    }
+  });
+
+  /* 输入框：Enter 发送 / Shift+Enter 换行 */
+  $('#miniInput').addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && !e.shiftKey){
+      e.preventDefault();
+      send();
+    }
+  });
+
+  /* 球：点击 / 右键 / 拖动 */
+  $('#ball').addEventListener('click', function(){
+    if (state.justDragged) return;
+    state.mode = 'mini';
+    render();
+  });
+  /* P2-2：右键真实打开菜单（不再只靠 :hover），Esc / 点击空白关闭
+     P2-N2：closeBallMenu 除改 data-open 外，还给 .ballwrap 加 data-menu="closed"，
+            让关闭状态在视觉上真正生效（CSS 提升优先级压掉 :hover / :focus-within）；
+            鼠标离开球时移除该标记，恢复正常悬停行为。 */
+  function openBallMenu(){
+    var m = $('#ballMenu'); if (!m) return;
+    var w = $('#ballwrap'); if (w) w.removeAttribute('data-menu');
+    m.setAttribute('data-open', 'true');
+    var b = $('#ball'); if (b) b.setAttribute('aria-expanded', 'true');
+    var first = m.querySelector('.ballmenu__item');
+    if (first){ try{ first.focus(); }catch(err){} }
+  }
+  function closeBallMenu(){
+    var m = $('#ballMenu'); if (!m) return false;
+    var wasOpen = m.getAttribute('data-open') === 'true';
+    m.setAttribute('data-open', 'false');
+    var w = $('#ballwrap'); if (w) w.setAttribute('data-menu', 'closed');
+    var b = $('#ball'); if (b) b.setAttribute('aria-expanded', 'false');
+    /* 焦点若在菜单内，必须移出，否则 .ballwrap:focus-within 会让菜单继续可见 */
+    if (m.contains(document.activeElement)){ try{ document.activeElement.blur(); }catch(err){} }
+    return wasOpen;
+  }
+  /* 鼠标离开球 → 撤掉「显式关闭」标记，下次悬停仍能正常打开菜单 */
+  $('#ballwrap').addEventListener('mouseleave', function(){
+    var w = $('#ballwrap'); if (w) w.removeAttribute('data-menu');
+  });
+  $('#ball').addEventListener('contextmenu', function(e){ e.preventDefault(); openBallMenu(); });
+
+  /* 拖动：球与按钮以外的标题栏 */
+  makeDraggable($('#ball'), $('#ballwrap'), {
+    onEnd: function(){ toast('位置已记忆（M1-4：重启后球回到这里）'); }
+  });
+  makeDraggable($('.mini__head'), $('#mini'), {
+    ignoreSelector: 'button',
+    onEnd: function(){ toast('小窗位置已记忆（本期不做：贴边 / 吸附 / 调宽 —— 已拍板 D-09，后置到 M6）'); }
+  });
+  makeDraggable($('.full__head'), $('#full'), {
+    ignoreSelector: 'button',
+    onEnd: function(){ toast('大窗已移动'); }
+  });
+
+  /* 会话列表与思考段用事件委托 */
+  document.addEventListener('change', function(e){
+    var cb = e.target.closest('[data-bi]');
+    if (cb){
+      var idx = cb.getAttribute('data-bi');
+      var op = BATCH_OPS[Number(idx)];
+      if (op) op.checked = cb.checked;
+    }
+  });
+
+  /* D-05：④ 组「本会话总是允许」开关（开关是静态节点，只绑一次）。
+     已拍板：降为设置项、默认关；开启后审批卡真的多出第 4 项，但前缀匹配规则待定。
+     关闭 → 审批卡就是 §3.3 的三个 outcome。渲染即时生效。 */
+  var optAlwaysAllow = $('#optAlwaysAllow');
+  if (optAlwaysAllow){
+    optAlwaysAllow.addEventListener('change', function(){
+      state.alwaysAllow = optAlwaysAllow.checked;
+      render();
+      toast(state.alwaysAllow
+        ? '已开启「本会话总是允许」：审批卡多出第 4 项；但前缀匹配规则待定（已拍板 D-05，默认应为关）'
+        : '已关闭「本会话总是允许」：审批卡恢复「允许一次 / 拒绝 / 中断整轮」三个 outcome');
+    });
+  }
+
+  /* ======================= 初始化静态内容 ======================= */
+  function initSteps(){
+    var wrap = $('#steps');
+    wrap.innerHTML = STEPS.map(function(s, i){
+      return (i > 0 ? '<span class="step__sep" aria-hidden="true">→</span>' : '') +
+        '<button class="step" type="button" data-step="' + s.n + '" aria-pressed="' + (s.n === state.level) + '">' +
+        '<span class="step__n">' + s.n + '</span><span>' + esc(s.label) + '</span></button>';
+    }).join('');
+  }
+
+  function initMap(){
+    $('#maplist').innerHTML = MAP.map(function(m){
+      if (m.g) return '<div class="mapgroup">' + esc(m.g) + '</div>';
+      return '<div class="mapitem"><div class="mapitem__ui">' + m.ui + '</div><span class="tag">' + esc(m.tag) + '</span></div>';
+    }).join('');
+  }
+
+  /* 初始化 */
+  initSteps();
+  initMap();
+  render();
+  paintUpgrade();
+  setTimeout(function(){ toast('原型已就绪：左侧控制台切换形态 / 球态 / 场景 / 审批卡 / 长任务级别'); }, 300);
+
+  /* 页面隐藏时清理计时器，避免后台空跑 */
+  window.addEventListener('beforeunload', function(){
+    stopStream();
+    stopUpgradeTimer();
+    if (state.autoplay) clearInterval(state.autoplay);
+    if (state.toastTimer) clearTimeout(state.toastTimer);
+    if (state.copyTimer) clearTimeout(state.copyTimer);
+  });})();
+</script>
+</body>
+</html>

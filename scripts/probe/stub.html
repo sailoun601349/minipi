@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>minipi · 宿主探针</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font: 12px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        color: #e6edf3;
+        user-select: none;
+      }
+      /* 球态（窗口 48×48）：只画一个圆点，避免内容溢出 */
+      #ball {
+        position: absolute;
+        inset: 0;
+        display: none;
+        place-items: center;
+        -webkit-app-region: drag;
+      }
+      #ball .dot {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 32%, #7db4ff, #2f6fd0 62%, #1b4a94);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+        display: grid;
+        place-items: center;
+        font-size: 9px;
+        font-weight: 700;
+        color: #fff;
+      }
+      body[data-window-size="small"] #ball {
+        display: grid;
+      }
+      body[data-window-size="small"] #panel {
+        display: none;
+      }
+
+      #panel {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px;
+        background: rgba(13, 17, 23, 0.96);
+        border-radius: 12px;
+        border: 1px solid #30363d;
+      }
+      #titlebar {
+        -webkit-app-region: drag;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid #21262d;
+      }
+      #titlebar b {
+        color: #9cc7ff;
+      }
+      .spacer {
+        flex: 1;
+      }
+      button {
+        -webkit-app-region: no-drag;
+        font: inherit;
+        color: #e6edf3;
+        background: #21262d;
+        border: 1px solid #363b42;
+        border-radius: 6px;
+        padding: 3px 8px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #2d333b;
+      }
+      button.primary {
+        background: #1f6feb;
+        border-color: #2f81f7;
+      }
+      #probe {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px 10px;
+        padding: 6px 8px;
+        background: #0b0f14;
+        border: 1px solid #21262d;
+        border-radius: 8px;
+        font-variant-numeric: tabular-nums;
+      }
+      #probe span.k {
+        color: #8b949e;
+      }
+      textarea {
+        -webkit-app-region: no-drag;
+        flex: 1;
+        min-height: 48px;
+        resize: none;
+        font: inherit;
+        color: #e6edf3;
+        background: #0b0f14;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 6px 8px;
+        user-select: text;
+      }
+      #log {
+        height: 128px;
+        overflow: auto;
+        background: #0b0f14;
+        border: 1px solid #21262d;
+        border-radius: 8px;
+        padding: 6px 8px;
+        font-family: Consolas, monospace;
+        font-size: 11px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        user-select: text;
+      }
+      .row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .hint {
+        color: #8b949e;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body data-window-size="large">
+    <!-- 球态内容（窗口 48×48 时只显示这个） -->
+    <div id="ball"><div class="dot" id="ballDot">···</div></div>
+
+    <div id="panel">
+      <div id="titlebar">
+        <b>minipi</b>
+        <span class="hint" id="stateLabel">…</span>
+        <span class="spacer"></span>
+        <button type="button" data-state="ball">球</button>
+        <button type="button" data-state="mini">小窗</button>
+        <button type="button" data-state="full">大窗</button>
+        <button type="button" id="quitBtn">退出</button>
+      </div>
+
+      <div id="probe">
+        <span class="k">形态</span><span id="pState">—</span>
+        <span class="k">rAF / 100ms定时器</span><span id="pTicks">0 / 0</span>
+        <span class="k">visibility / focus</span><span id="pVis">—</span>
+        <span class="k">已跑毫秒</span><span id="pMs">0</span>
+        <span class="k">sessionId / seq</span><span id="pSession">—</span>
+        <span class="k">model / isStreaming</span><span id="pModel">—</span>
+        <span class="k">text_delta 条数 / 首字延迟</span><span id="pDelta">0 / —</span>
+      </div>
+
+      <div class="row">
+        <button type="button" class="primary" id="newSessionBtn">建会话（quick）</button>
+        <button type="button" id="sendBtn">发送 prompt</button>
+        <button type="button" id="abortBtn">中断</button>
+        <button type="button" id="stateBtn">sessionState</button>
+      </div>
+
+      <textarea id="prompt" spellcheck="false">用一句话说明什么是梯度下降</textarea>
+      <div id="log"></div>
+      <div class="hint">
+        本页是**宿主层自测用的临时兜底页**（src/renderer/index.html 到位后自动不再使用）。
+      </div>
+    </div>
+
+    <script>
+      /* ============================================================
+         探针：给 M0-3 / M0-4 硬指标用。
+         rAF 与 100ms 定时器的计数都在**渲染进程**里跑；主进程用 executeJavaScript
+         读这两个数，就能判断「窗口未聚焦 / 被遮挡时是否还在刷新」。
+         与 spike/electron-window/renderer/probe.html 同一套接口，便于对照。
+         ============================================================ */
+      (function installProbe() {
+        const counters = { raf: 0, interval: 0, since: performance.now() };
+        let rafHandle = 0;
+
+        function tick() {
+          counters.raf += 1;
+          rafHandle = requestAnimationFrame(tick);
+        }
+        rafHandle = requestAnimationFrame(tick);
+
+        const intervalHandle = setInterval(() => {
+          counters.interval += 1;
+        }, 100);
+
+        window.__probe = counters;
+
+        window.__probeReset = function () {
+          counters.raf = 0;
+          counters.interval = 0;
+          counters.since = performance.now();
+          return true;
+        };
+
+        window.__probeRead = function () {
+          return {
+            raf: counters.raf,
+            interval: counters.interval,
+            elapsedMs: Math.round(performance.now() - counters.since),
+            visibilityState: document.visibilityState,
+            hidden: document.hidden,
+            hasFocus: document.hasFocus(),
+          };
+        };
+
+        window.__probeStop = function () {
+          cancelAnimationFrame(rafHandle);
+          clearInterval(intervalHandle);
+          return window.__probeRead();
+        };
+      })();
+
+      /* ============================================================
+         兜底页的交互（用来人工验证契约）
+         ============================================================ */
+      const $ = (id) => document.getElementById(id);
+      const logEl = $("log");
+
+      function log(line) {
+        const ts = new Date().toLocaleTimeString();
+        logEl.textContent = `[${ts}] ${line}\n${logEl.textContent}`.slice(0, 8000);
+      }
+
+      let sessionId = null;
+      let deltaCount = 0;
+      let firstDeltaAt = null;
+      let promptSentAt = 0;
+
+      function refreshCounters() {
+        const info = window.__probeRead();
+        $("pTicks").textContent = `${info.raf} / ${info.interval}`;
+        $("pVis").textContent = `${info.visibilityState} / ${info.hasFocus ? "focused" : "unfocused"}`;
+        $("pMs").textContent = String(info.elapsedMs);
+        // 球态时给个「在动」的视觉反馈（人眼验证未聚焦是否停画）
+        $("ballDot").textContent = String(info.raf % 1000);
+        requestAnimationFrame(refreshCounters);
+      }
+      requestAnimationFrame(refreshCounters);
+
+      function setStateLabel(state, bounds) {
+        $("stateLabel").textContent = `${state} · ${bounds ? bounds.width + "×" + bounds.height : "—"}`;
+        $("pState").textContent = state;
+        document.body.dataset.windowSize = state === "ball" ? "small" : "large";
+      }
+
+      const api = window.minipi;
+
+      /* 给自测套件（scripts/selftest/main.mjs）读的证据收集器 */
+      window.__hostProbe = { windowState: [], events: 0, hotkeys: 0, lastEvent: null, preloadOk: !!api };
+
+      if (!api) {
+        log("❌ window.minipi 不存在 —— preload 没生效（检查 webPreferences.preload / sandbox）");
+      } else {
+        log("✅ window.minipi 已就绪");
+        api.onWindowState((payload) => {
+          window.__hostProbe.windowState.push(payload);
+          setStateLabel(payload.state, payload.bounds);
+        });
+        api.onHotkey((payload) => {
+          window.__hostProbe.hotkeys += 1;
+          log(`hotkey → ${JSON.stringify(payload)}`);
+        });
+        api.onEvent((wrapped) => {
+          const ev = wrapped.event || {};
+          window.__hostProbe.events += 1;
+          window.__hostProbe.lastEvent = { seq: wrapped.seq, type: ev.type ?? null };
+          if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
+            deltaCount += 1;
+            if (firstDeltaAt === null) firstDeltaAt = performance.now();
+            $("pDelta").textContent = `${deltaCount} / ${Math.round(firstDeltaAt - promptSentAt)}ms`;
+          }
+          if (
+            ev.type === "agent_start" ||
+            ev.type === "agent_end" ||
+            ev.type === "agent_settled" ||
+            ev.type === "error" ||
+            ev.type === "turn_end"
+          ) {
+            log(`#${wrapped.seq} ${ev.type}${ev.errorMessage ? " · " + ev.errorMessage : ""}`);
+          }
+        });
+
+        api
+          .getSettings()
+          .then((s) => log(`getSettings → ${JSON.stringify(s)}`))
+          .catch((e) => log(`getSettings 失败 → ${e.message}`));
+      }
+
+      document.querySelectorAll("button[data-state]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          try {
+            const r = await api.setWindowState({ state: btn.dataset.state });
+            log(`setWindowState(${btn.dataset.state}) → ok=${r.ok} bounds=${r.bounds.width}×${r.bounds.height}`);
+          } catch (e) {
+            log(`setWindowState 失败 → ${e.message}`);
+          }
+        });
+      });
+
+      $("quitBtn").addEventListener("click", () => api?.quit());
+
+      $("newSessionBtn").addEventListener("click", async () => {
+        try {
+          const r = await api.createSession({ sceneId: "quick" });
+          sessionId = r.sessionId;
+          log(`createSession → ${JSON.stringify(r)}`);
+          $("pSession").textContent = `${r.sessionId} / 0`;
+        } catch (e) {
+          log(`createSession 失败 → ${e.message}`);
+        }
+      });
+
+      $("sendBtn").addEventListener("click", async () => {
+        if (!sessionId) return log("先建会话");
+        deltaCount = 0;
+        firstDeltaAt = null;
+        promptSentAt = performance.now();
+        $("pDelta").textContent = "0 / —";
+        try {
+          const r = await api.prompt({ sessionId, text: $("prompt").value, behavior: "steer" });
+          log(`prompt → accepted=${r.accepted}（发送耗时 ${Math.round(performance.now() - promptSentAt)}ms）`);
+        } catch (e) {
+          log(`prompt 失败 → ${e.message}`);
+        }
+      });
+
+      $("abortBtn").addEventListener("click", async () => {
+        if (!sessionId) return log("先建会话");
+        try {
+          log(`abort → ${JSON.stringify(await api.abort({ sessionId }))}`);
+        } catch (e) {
+          log(`abort 失败 → ${e.message}`);
+        }
+      });
+
+      $("stateBtn").addEventListener("click", async () => {
+        if (!sessionId) return log("先建会话");
+        try {
+          const s = await api.sessionState({ sessionId });
+          log(`sessionState → ${JSON.stringify(s)}`);
+          $("pSession").textContent = `${s.sessionId} / ${s.lastSeq}`;
+          $("pModel").textContent = `${s.model ?? "—"} / ${s.isStreaming}`;
+        } catch (e) {
+          log(`sessionState 失败 → ${e.message}`);
+        }
+      });
+    </script>
+  </body>
+</html>

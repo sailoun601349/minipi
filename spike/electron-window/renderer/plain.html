@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>minipi spike · 纯色辅助窗</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    font: 12px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: grid; place-items: center; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+</style>
+</head>
+<body>
+  <div id="label">plain</div>
+  <script>
+    /* 用法：plain.html?color=%23FF00FF&label=backdrop
+       用途一：背板窗（放在透明球窗正下方，纯色）—— 用屏幕截图核对「底色是否透出来」
+       用途二：遮挡窗 / 抢焦点窗（不透明）—— 制造「未聚焦 / 被遮挡」条件 */
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var c = q.get('color') || '#FF00FF';
+      var l = q.get('label') || 'plain';
+      document.body.style.background = c;
+      document.getElementById('label').textContent = l;
+    })();
+  </script>
+</body>
+</html>

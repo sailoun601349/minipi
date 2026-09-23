@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>minipi spike · 未聚焦节流探针</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #101820; color: #dfe7ef;
+    font: 13px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; overflow: hidden; }
+  #box { padding: 14px 16px; }
+  #num { font-size: 12px; color: #9cc7ff; }
+  .k { color: #8b949e; }
+</style>
+</head>
+<body>
+  <div id="box">
+    <div><b>未聚焦节流探针</b>（Electron <code>webPreferences.backgroundThrottling</code>）</div>
+    <div id="num" class="k">等待测量…</div>
+  </div>
+  <script>
+    (function () {
+      'use strict';
+      var ticks = { raf: 0, interval: 0 };
+      var running = false;
+      var iv = null;
+
+      function rafLoop() {
+        if (!running) return;
+        ticks.raf++;
+        requestAnimationFrame(rafLoop);
+      }
+
+      /* 主进程调用：window.__probeStart(ms) -> Promise<{raf, interval, ...}> */
+      window.__probeStart = function (ms) {
+        ticks = { raf: 0, interval: 0 };
+        running = true;
+        requestAnimationFrame(rafLoop);
+        iv = setInterval(function () { ticks.interval++; }, 100);
+        var t0 = Date.now();
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            running = false;
+            if (iv) { clearInterval(iv); iv = null; }
+            resolve({
+              raf: ticks.raf,
+              interval: ticks.interval,
+              elapsedMs: Date.now() - t0,
+              requestedMs: ms,
+              hidden: document.hidden,
+              visibilityState: document.visibilityState,
+              hasFocus: document.hasFocus(),
+              innerWidth: window.innerWidth,
+              innerHeight: window.innerHeight
+            });
+          }, ms);
+        });
+      };
+
+      window.__probeInfo = function () {
+        return {
+          hidden: document.hidden,
+          visibilityState: document.visibilityState,
+          hasFocus: document.hasFocus(),
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight
+        };
+      };
+
+      /* 只用于肉眼看进度；这个定时器自己也会被节流，不影响上面的计数 */
+      setInterval(function () {
+        var el = document.getElementById('num');
+        if (el) {
+          el.textContent = 'raf=' + ticks.raf + '  ·  interval100ms=' + ticks.interval +
+            '  ·  focus=' + document.hasFocus() + '  ·  visibility=' + document.visibilityState;
+        }
+      }, 250);
+    })();
+  </script>
+</body>
+</html>

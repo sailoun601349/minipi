@@ -1,0 +1,4004 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!--
+  minipi 渲染层 · 真实可用界面（不是原型）
+  ---------------------------------------------------------------------------
+  约束（主理人已拍板，勿改）：
+    · 零构建 / 零外部依赖：本文件是自包含单文件，内联 <style> + 内联
+      <script type="module">。**没有任何外部子资源**（无 link rel=stylesheet、
+      无 script src=、无 @import、无 fetch/XHR/WebSocket、无 CDN）。
+      进程间一律走 window.minipi（Electron IPC via preload）。
+    · 纯 ESM：<script type="module">。
+    · 视觉与信息架构基线 = prototype/minipi-prototype.html（v0.5）；色彩变量、
+      圆角、阴影层次照它抄，保持一致。
+  契约：字段名逐字对齐 src/shared/protocol.js（冻结）。
+  字段名无法 import（零构建 + file:// 下 ESM 外链会被 CORS 拦），故在下方
+  「契约镜像」区块里逐字复制常量；注意：如需核对，改 protocol.js 时这里也要改
+  （已作为「需要主进程配合」项上报）。
+-->
+<title>minipi</title>
+<style>
+/* ==========================================================================
+   1. 设计令牌（照 prototype/minipi-prototype.html v0.5 抄，保持一致）
+   ========================================================================== */
+:root{
+  --bg:#0b0f14; --bg-2:#0e131a;
+  --surface:#151b23; --surface-2:#1b232d; --surface-3:#222c38;
+  --border:#2c3742; --border-strong:#3d4b59;
+  --text:#e6edf3; --text-2:#b9c5d1; --muted:#8b949e;
+  --accent:#4c9aff; --accent-2:#1f6feb;
+  --danger:#f85149; --success:#3fb950; --warn:#e3b341; --violet:#a371f7;
+  --radius:10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  /* 透明窗口四角必须空着：卡片四边留内边距 */
+  --gap: 8px;
+}
+
+*,*::before,*::after{ box-sizing:border-box; }
+html,body{
+  height:100%; margin:0; padding:0;
+  /* ★ 透明窗口上的内容：根背景必须透明，只有卡片自己有底色 */
+  background:transparent;
+  color:var(--text); font-family:var(--sans); font-size:13px; line-height:1.55;
+  -webkit-font-smoothing:antialiased; overflow:hidden;
+  user-select:none;
+}
+button,input,textarea,select{ font:inherit; color:inherit; }
+button{ background:none; border:0; cursor:pointer; }
+ul,ol{ margin:0; padding:0; list-style:none; }
+h1,h2,h3,h4,p,figure{ margin:0; }
+code,kbd,pre{ font-family:var(--mono); }
+/* 不做全局 outline:none —— 只给可见焦点环 */
+:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; border-radius:6px; }
+
+.sr-only{
+  position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+  overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0;
+}
+[hidden]{ display:none !important; }
+
+@media (prefers-reduced-motion: reduce){
+  *{ animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+}
+
+@keyframes spin{ to{ transform:rotate(360deg); } }
+@keyframes blink{ 50%{ opacity:0; } }
+@keyframes pulseDot{ 0%,100%{ opacity:.32; transform:translateY(0); } 40%{ opacity:1; transform:translateY(-2px); } }
+@keyframes pulseYellow{ 0%,100%{ box-shadow:0 0 0 0 rgba(227,179,65,.55); } 60%{ box-shadow:0 0 0 7px rgba(227,179,65,0); } }
+@keyframes toastIn{ from{ opacity:0; transform:translate(-50%,10px); } to{ opacity:1; transform:translate(-50%,0); } }
+
+/* ==========================================================================
+   2. 舞台：真实模式下 = 整个窗口；mock 模式（浏览器直开）= 模拟窗口尺寸的预览框
+   ========================================================================== */
+#stage{ position:fixed; inset:0; overflow:hidden; }
+
+html[data-mock="1"] body{ background:#0a0d12; }
+html[data-mock="1"] #stage{
+  left:50%; top:50%; transform:translate(-50%,-50%);
+  /* 棋盘格：用来肉眼确认「四角真的是透明的」 */
+  background-color:#101418;
+  background-image:
+    linear-gradient(45deg,#1c222b 25%,transparent 25%,transparent 75%,#1c222b 75%),
+    linear-gradient(45deg,#1c222b 25%,transparent 25%,transparent 75%,#1c222b 75%);
+  background-size:16px 16px; background-position:0 0,8px 8px;
+  outline:1px dashed #3d4b59; outline-offset:0;
+}
+html[data-mock="1"][data-mode="ball"] #stage{ width:48px;  height:48px; }
+html[data-mock="1"][data-mode="mini"] #stage{ width:360px; height:480px; }
+html[data-mock="1"][data-mode="full"] #stage{ width:960px; height:680px; }
+
+/* 三个形态容器：始终在 DOM 里，只切 hidden —— 切换形态不重建 DOM */
+.modeRoot{ position:absolute; inset:0; }
+
+/* ==========================================================================
+   3. ① 球 48×48
+   ========================================================================== */
+#ballRoot{ display:grid; place-items:center; }
+.ball{
+  position:relative; width:48px; height:48px; border-radius:50%;
+  display:grid; place-items:center; padding:0;
+  background:radial-gradient(circle at 32% 28%, #2a3542, #12171d 72%);
+  border:1px solid #43505f;
+  box-shadow:0 0 0 1px rgba(255,255,255,.05) inset, 0 12px 28px rgba(0,0,0,.6), 0 0 20px rgba(76,154,255,.2);
+  transition:transform .15s ease, box-shadow .2s, background .2s, border-color .2s;
+  /* 拖动整个球移动窗口（主进程在 move 事件里记位置） */
+  -webkit-app-region: drag;
+  cursor:grab;
+}
+.ball:hover{ transform:scale(1.06); box-shadow:0 0 0 1px rgba(255,255,255,.06) inset, 0 14px 32px rgba(0,0,0,.65), 0 0 26px rgba(76,154,255,.38); }
+.ball:active{ transform:scale(.95); cursor:grabbing; }
+/* 可点击的核心：必须 no-drag，否则 drag 区上的点击事件在 Chromium 里根本不派发给渲染层 */
+.ball__core{
+  -webkit-app-region: no-drag;
+  width:36px; height:36px; border-radius:50%;
+  display:grid; place-items:center;
+  font-size:15px; font-weight:800; color:#cfe3ff; line-height:1;
+}
+.ball__badge{ position:absolute; display:none; right:-1px; top:-1px; }
+
+/* 状态环（§4.1 球态四子状态；「待确认」本期不会出现，样式先留着） */
+#ballRoot[data-ball="thinking"] .ball::after{
+  content:''; position:absolute; inset:-5px; border-radius:50%;
+  border:2px solid transparent; border-top-color:var(--accent); border-right-color:rgba(76,154,255,.3);
+  animation:spin 1s linear infinite; pointer-events:none;
+}
+#ballRoot[data-ball="thinking"]{ /* 已含在球内 */ }
+#ballRoot[data-ball="unread"] .ball__badge{
+  display:block; width:13px; height:13px; border-radius:50%;
+  background:var(--danger); border:2px solid #0b0f14;
+}
+#ballRoot[data-ball="await"] .ball{
+  background:radial-gradient(circle at 32% 28%, #866619, #3d2f06 72%);
+  border-color:var(--warn);
+  box-shadow:0 0 0 1px rgba(227,179,65,.4) inset, 0 12px 28px rgba(0,0,0,.6), 0 0 26px rgba(227,179,65,.5);
+}
+#ballRoot[data-ball="await"] .ball::after{
+  content:'!'; position:absolute; right:-6px; top:-6px; width:19px; height:19px; border-radius:50%;
+  background:var(--warn); color:#2a1f00; font-weight:900; font-size:12px;
+  display:grid; place-items:center; border:2px solid #0b0f14;
+  animation:pulseYellow 1.4s ease-in-out infinite; pointer-events:none;
+}
+
+/* ==========================================================================
+   4. 通用控件
+   ========================================================================== */
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+  padding:6px 10px; border-radius:8px; font-size:12px; line-height:1.2;
+  border:1px solid var(--border-strong); background:var(--surface-2); color:var(--text-2);
+  transition:background .14s, border-color .14s, color .14s, transform .1s;
+  white-space:nowrap; -webkit-app-region:no-drag;
+}
+.btn:hover{ background:var(--surface-3); color:var(--text); border-color:#4d5d6d; }
+.btn:active{ transform:translateY(1px); }
+.btn--sm{ padding:4px 8px; font-size:11.5px; }
+.btn--block{ width:100%; }
+.btn--primary{ background:var(--accent-2); border-color:#3b82f6; color:#fff; }
+.btn--primary:hover{ background:#2b7ef0; border-color:#60a5fa; color:#fff; }
+.btn--danger{ background:rgba(248,81,73,.14); border-color:rgba(248,81,73,.5); color:#ff9d96; }
+.btn--danger:hover{ background:rgba(248,81,73,.24); border-color:var(--danger); color:#ffd0cc; }
+.btn--ghost{ background:transparent; border-color:var(--border); }
+.btn--ghost:hover{ background:var(--surface-2); }
+.btn--warn{ background:rgba(227,179,65,.18); border-color:rgba(227,179,65,.6); color:#f2cf70; }
+.btn--warn:hover{ background:rgba(227,179,65,.3); color:#ffe6a3; }
+.btn[aria-pressed="true"]{ background:rgba(76,154,255,.18); border-color:var(--accent); color:#cfe3ff; }
+.btn:disabled{ opacity:.5; cursor:not-allowed; }
+
+kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); background:var(--surface-3); border:1px solid var(--border-strong); }
+.tag{
+  font-size:10px; padding:1px 6px; border-radius:999px; white-space:nowrap;
+  background:rgba(76,154,255,.14); color:#9cc7ff; border:1px solid rgba(76,154,255,.34);
+}
+.chip{
+  font-size:10px; padding:1px 6px; border-radius:999px; white-space:nowrap; flex-shrink:0;
+  border:1px solid var(--border-strong); background:var(--surface-3); color:var(--text-2);
+}
+.chip--quick{ background:rgba(76,154,255,.14); border-color:rgba(76,154,255,.4); color:#9cc7ff; }
+.chip--note{ background:rgba(163,113,247,.16); border-color:rgba(163,113,247,.42); color:#cbb2ff; }
+.chip--desk{ background:rgba(236,156,62,.15); border-color:rgba(236,156,62,.42); color:#f0c08a; }
+.chip--repo{ background:rgba(63,185,80,.14); border-color:rgba(63,185,80,.42); color:#8fdda0; }
+.chip--tool{ background:rgba(227,179,65,.14); border-color:rgba(227,179,65,.45); color:#f2cf70; font-family:var(--mono); }
+.chip--warn{ background:rgba(227,179,65,.18); border-color:rgba(227,179,65,.5); color:#f2cf70; }
+.chip--danger{ background:rgba(248,81,73,.16); border-color:rgba(248,81,73,.45); color:#ff9d96; }
+/* 产出卡片的格式 chip：docx 用蓝（正式产出）、md 用紫（纯文本兜底）。
+   颜色复用既有 --accent / --violet 色系，不引入新色。 */
+.chip--docx{ background:rgba(76,154,255,.14); border-color:rgba(76,154,255,.4); color:#9cc7ff; font-family:var(--mono); }
+.chip--md{ background:rgba(163,113,247,.16); border-color:rgba(163,113,247,.42); color:#cbb2ff; font-family:var(--mono); }
+.chip--ok{ background:rgba(63,185,80,.14); border-color:rgba(63,185,80,.42); color:#8fdda0; }
+
+/* ==========================================================================
+   4b. 产出卡片（OutcomeCard，方案 §3.4 / impl-plan §3.4）
+   --------------------------------------------------------------------------
+   贴在对话流里（和工具卡同一层，紧跟产生它的那一轮），**不是**顶部 toast。
+   左侧 2px 强调边框：成功 = 绿（--success）、降级 = 警告色（--warn）。
+   360×480 硬约束：容器 min-width:0，button 行 flex-shrink 控制不换行、不溢出。
+   ========================================================================== */
+.outcome{
+  width:100%; min-width:0; display:flex; flex-direction:column; gap:5px;
+  padding:8px 10px; border-radius:9px;
+  background:var(--surface-2); border:1px solid var(--border);
+  border-left:2px solid var(--success);
+}
+/* 降级时：左侧强调边与底色换成警告色 —— 「绝不假装成功」（方案 §3.3） */
+.outcome--degraded{ border-left-color:var(--warn); background:rgba(227,179,65,.06); }
+.outcome__top{ display:flex; align-items:center; gap:5px; min-width:0; flex-wrap:nowrap; }
+.outcome__title{ font-size:11px; color:var(--muted); flex-shrink:0; }
+/* 文件名：单行省略兜底（JS 侧还会做中间截断，这里是双保险） */
+.outcome__name{
+  font-size:12px; color:var(--text); font-family:var(--mono); min-width:0; flex:1;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.outcome__meta{
+  font-size:10.5px; color:var(--muted); min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* 三按钮行：flex + nowrap + 每个按钮 flex-shrink:0，确保 360 宽下绝不换行/溢出 */
+.outcome__acts{ display:flex; align-items:center; gap:5px; min-width:0; flex-wrap:nowrap; margin-top:2px; }
+.outcome__acts .btn{ flex-shrink:0; }
+.outcome__acts .outcome__spacer{ flex:1; min-width:0; }
+.outcome__note{ font-size:10.5px; color:var(--muted); min-width:0; word-break:break-word; }
+
+/* ==========================================================================
+   4c. 审批卡（ApprovalCard，M4.5 / 审批设计 §9.3）
+   --------------------------------------------------------------------------
+   贴在对话流里（与产出卡同一层）。左侧 2px 强调边用**警告色**（--warn）——
+   「需要你做决定」的视觉语义，与产出卡的「完成」绿边区分。
+   三类模板：write（预览 + 覆盖警示）/ edit（真实 diff）/ command（全命令 + 高危标红）。
+   360×480 硬约束：容器 min-width:0、长命令/diff 用横向滚动而非撑破卡片。
+   ========================================================================== */
+.approval{
+  width:100%; min-width:0; display:flex; flex-direction:column; gap:6px;
+  padding:9px 10px; border-radius:9px;
+  background:rgba(227,179,65,.07); border:1px solid rgba(227,179,65,.4);
+  border-left:2px solid var(--warn);
+}
+/* 已超时 / 已决：置灰、不再醒目（团队拍板：到 0 置灰显示「已超时，已拒绝」，等 cancel 再移除） */
+.approval--expired{ opacity:.62; border-left-color:var(--muted); background:var(--surface-2); }
+.approval--deciding{ opacity:.7; }
+
+.approval__top{ display:flex; align-items:center; gap:5px; min-width:0; flex-wrap:nowrap; }
+.approval__title{ font-size:12px; font-weight:700; color:#ffe6a3; flex-shrink:0; }
+.approval__count{ font-size:10px; color:var(--muted); flex-shrink:0; }
+/* 倒计时：等宽数字，避免每秒跳动导致宽度抖动 */
+.approval__timer{
+  margin-left:auto; flex-shrink:0; font-size:10.5px; color:var(--muted);
+  font-family:var(--mono); font-variant-numeric:tabular-nums;
+}
+.approval--expired .approval__timer{ color:var(--danger); }
+
+/* 卡体：每条待批调用一块（合并卡会有多块） */
+.approval__batch{ display:flex; flex-direction:column; gap:8px; min-width:0; }
+.approval__item{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.approval__item + .approval__item{ padding-top:8px; border-top:1px dashed var(--border); }
+.approval__itemhead{ display:flex; align-items:center; gap:5px; min-width:0; flex-wrap:nowrap; }
+.approval__itemtitle{ font-size:11.5px; color:var(--text); flex-shrink:0; }
+.approval__path{
+  font-size:11px; color:#9cc7ff; font-family:var(--mono); flex-shrink:0;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.approval__sub{ font-size:10.5px; color:var(--muted); min-width:0; word-break:break-word; }
+/* 代码块（预览 / 命令 / diff）：横向滚动，绝不撑破卡片 */
+.approval__code{
+  margin:0; padding:6px 8px; border-radius:6px; max-width:100%; min-width:0;
+  background:var(--bg-2); border:1px solid var(--border);
+  font-family:var(--mono); font-size:10.5px; line-height:1.55; color:var(--text-2);
+  overflow-x:auto; overflow-y:auto; max-height:150px;
+  white-space:pre; word-break:normal;
+}
+.approval__code--risk{ border-color:rgba(248,81,73,.5); background:rgba(248,81,73,.07); color:#ffd0cc; }
+/* diff 行着色：新增绿 / 删除红 / hunk 头紫 */
+.approval__diff .d-add{ color:#8fdda0; }
+.approval__diff .d-del{ color:#ff9d96; }
+.approval__diff .d-hunk{ color:#cbb2ff; }
+.approval__diff .d-ctx{ color:var(--muted); }
+.approval__stat{ font-size:10px; font-family:var(--mono); flex-shrink:0; }
+.approval__stat .s-add{ color:#8fdda0; }
+.approval__stat .s-del{ color:#ff9d96; }
+
+/* 高危 / 覆盖：重警示条 */
+.approval__warn{
+  font-size:10.5px; line-height:1.45; color:#ff9d96; min-width:0; word-break:break-word;
+  display:flex; align-items:flex-start; gap:4px;
+}
+.approval__warn::before{ content:'⚠'; flex-shrink:0; }
+
+/* 勾选框行：本会话总是允许（默认不勾；只对「允许一次」生效） */
+.approval__remember{
+  display:flex; align-items:center; gap:6px; min-width:0;
+  font-size:10.5px; color:var(--text-2); cursor:pointer; user-select:none;
+}
+.approval__remember input{ flex-shrink:0; margin:0; cursor:pointer; }
+.approval__remember[aria-disabled="true"]{ opacity:.5; cursor:not-allowed; }
+
+/* 三按钮行：flex + nowrap + 每个按钮 flex-shrink:0，确保 360 宽不换行/不溢出 */
+.approval__acts{ display:flex; align-items:center; gap:5px; min-width:0; flex-wrap:wrap; margin-top:2px; }
+.approval__acts .btn{ flex-shrink:0; }
+.approval__acts .approval__spacer{ flex:1; min-width:0; }
+.approval__note{ font-size:10.5px; color:var(--muted); min-width:0; word-break:break-word; }
+
+/* 拖动条：卡头整条可拖，里面的按钮必须 no-drag */
+.dragbar{ -webkit-app-region: drag; }
+.dragbar button, .dragbar input, .dragbar textarea, .dragbar select, .dragbar a, .dragbar [role="button"]{ -webkit-app-region: no-drag; }
+
+/* ==========================================================================
+   5. ② 小窗 360×480
+   ========================================================================== */
+#miniRoot{ padding:var(--gap); display:flex; }
+.mini{
+  flex:1; min-width:0; min-height:0; display:flex; flex-direction:column;
+  background:rgba(18,24,31,.96); border:1px solid #46545f; border-radius:14px;
+  box-shadow:0 30px 70px rgba(0,0,0,.72), 0 0 0 1px rgba(140,180,230,.14), 0 0 48px rgba(76,154,255,.16);
+  overflow:hidden;
+}
+.mini__head{
+  flex-shrink:0; height:36px; display:flex; align-items:center; gap:8px; padding:0 10px;
+  background:rgba(34,44,56,.75); border-bottom:1px solid var(--border);
+}
+.mini__title{ font-size:12px; font-weight:600; color:var(--text); flex-shrink:0; }
+.mini__sceneChip{ flex-shrink:0; }
+.mini__spacer{ flex:1; min-width:0; }
+.mini__dragHint{
+  font-size:10px; color:var(--muted); min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* mock 模式徽标 / 未连接提示 */
+.badgebar{
+  flex-shrink:0; display:flex; align-items:center; gap:7px; padding:4px 10px;
+  font-size:10.5px; line-height:1.4;
+  background:rgba(163,113,247,.14); border-bottom:1px solid rgba(163,113,247,.4); color:#d7c4ff;
+}
+.badgebar b{ color:#efe7ff; }
+
+/* 审批横幅：M4 才接。样式与 DOM 位置先留着（本期 hidden） */
+.banner{
+  flex-shrink:0; display:flex; align-items:center; gap:8px; padding:7px 10px;
+  background:linear-gradient(90deg, rgba(227,179,65,.26), rgba(227,179,65,.12));
+  border-bottom:1px solid rgba(227,179,65,.5);
+}
+.banner__text{ font-size:12px; font-weight:700; color:#ffe6a3; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.banner .btn{ margin-left:auto; flex-shrink:0; }
+
+.mini__body{ flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.mini__foot{
+  flex-shrink:0; border-top:1px solid var(--border); background:rgba(34,44,56,.6);
+  padding:8px 10px 9px; display:flex; flex-direction:column; gap:6px;
+}
+.mini__input{
+  width:100%; resize:none; border-radius:9px; padding:8px 10px; font-size:12.5px; line-height:1.5;
+  background:var(--surface); border:1px solid var(--border-strong); color:var(--text);
+  user-select:text; -webkit-app-region:no-drag;
+}
+.mini__input::placeholder{ color:#8b949e; opacity:1; }
+.mini__input:focus{ border-color:var(--accent); }
+.mini__footmeta{ display:flex; align-items:center; gap:8px; min-width:0; }
+.kbd-hint{ font-size:10.5px; color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mini__footrow{ display:flex; align-items:center; gap:6px; }
+.mini__footrow .btn:last-child{ margin-left:auto; }
+.mini__note{ font-size:10.5px; color:var(--muted); line-height:1.5; word-break:break-word; }
+
+/* ==========================================================================
+   6. 消息 / 段落（小窗与大窗共用）
+   ========================================================================== */
+.msg{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.msg--user{ align-items:flex-end; }
+.msg--pi{ align-items:flex-start; }
+.bubble{
+  max-width:86%; padding:7px 10px; border-radius:11px; font-size:12.5px; line-height:1.6;
+  word-break:break-word; user-select:text;
+}
+.msg--user .bubble{ background:rgba(76,154,255,.2); border:1px solid rgba(76,154,255,.42); color:#e8f1ff; border-bottom-right-radius:3px; }
+.pihead{ display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); min-width:0; }
+.piavatar{
+  width:17px; height:17px; border-radius:50%; flex-shrink:0; display:grid; place-items:center;
+  background:rgba(76,154,255,.18); border:1px solid rgba(76,154,255,.4); color:#9cc7ff;
+  font-size:10px; font-weight:800;
+}
+.pibody{
+  max-width:92%; min-width:0; padding:8px 10px; border-radius:11px;
+  background:var(--surface); border:1px solid var(--border);
+  color:var(--text-2); font-size:12.5px; line-height:1.68; border-bottom-left-radius:3px;
+  word-break:break-word; overflow-wrap:anywhere;
+}
+.pibody--wide{ max-width:100%; }
+.pibody--error{ border-color:rgba(248,81,73,.5); background:rgba(248,81,73,.08); }
+.pibody p{ margin:0 0 8px; }
+.pibody p:last-child{ margin-bottom:0; }
+.pibody h3{ font-size:13px; color:var(--text); margin:2px 0 7px; font-weight:700; }
+.pibody h4{ font-size:12.5px; color:var(--text); margin:2px 0 6px; font-weight:700; }
+.pibody strong{ color:var(--text); }
+.pibody em{ color:var(--text); }
+.pibody code{ color:#9cc7ff; font-size:11.5px; background:rgba(76,154,255,.1); border-radius:4px; padding:0 3px; }
+.pibody ul{ margin:0 0 8px; padding-left:2px; }
+.pibody li{ position:relative; padding-left:14px; margin-bottom:3px; }
+.pibody li::before{ content:'•'; position:absolute; left:3px; color:var(--muted); }
+.pibody a{ color:#9cc7ff; text-decoration:underline; text-underline-offset:2px; cursor:pointer; word-break:break-all; }
+.pibody a:hover{ color:#cfe3ff; }
+.pibody hr{ border:0; border-top:1px dashed var(--border); margin:8px 0; }
+.pibody blockquote{ margin:0 0 8px; padding:4px 9px; border-left:2px solid var(--border-strong); color:var(--muted); }
+
+.pulse{ display:flex; align-items:center; gap:5px; }
+.pulse span{ width:7px; height:7px; border-radius:50%; background:var(--accent); animation:pulseDot 1.1s ease-in-out infinite; }
+.pulse span:nth-child(2){ animation-delay:.18s; }
+.pulse span:nth-child(3){ animation-delay:.36s; }
+.pulsetext{ font-size:11.5px; color:var(--muted); margin-top:6px; }
+.caret{ display:inline-block; width:7px; height:13px; background:var(--accent); vertical-align:-2px; animation:blink 1s steps(2,start) infinite; }
+
+/* 思考段（小窗默认收起、大窗默认展开；折叠状态存在 store 里，重渲染不丢） */
+.thinkbox{ width:100%; border:1px solid var(--border); border-radius:9px; background:var(--bg-2); overflow:hidden; }
+.thinkbox__head{
+  display:flex; align-items:center; gap:7px; width:100%; padding:6px 9px; text-align:left;
+  font-size:11.5px; color:var(--text-2); background:transparent; min-width:0;
+}
+.thinkbox__head:hover{ background:var(--surface-2); }
+.thinkbox__head .chip{ margin-left:auto; }
+.thinkbox__title{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.thinkbox__body{
+  padding:8px 10px 9px; font-size:11.5px; color:var(--muted); line-height:1.65;
+  border-top:1px dashed var(--border); word-break:break-word; overflow-wrap:anywhere; user-select:text;
+}
+
+/* 工具调用紧凑行（小窗） */
+.tooline{
+  display:flex; align-items:center; gap:7px; width:100%; text-align:left; min-width:0;
+  padding:6px 9px; border-radius:8px; font-size:11.5px;
+  background:var(--surface-2); border:1px solid var(--border); color:var(--text-2);
+  transition:border-color .14s, background .14s;
+}
+.tooline:hover{ background:var(--surface-3); border-color:var(--border-strong); }
+.tooline code{ color:#9cc7ff; flex-shrink:0; }
+.tooline__path{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1; font-family:var(--mono); }
+.tooline__chev{ flex-shrink:0; font-size:10.5px; color:var(--muted); }
+.gear{ flex-shrink:0; display:inline-block; animation:spin 1.6s linear infinite; }
+.toolDetail{
+  margin-top:6px; padding:8px 10px; border-radius:8px; background:#10161d;
+  border:1px dashed var(--border-strong); font-size:11px; color:var(--muted); line-height:1.6;
+  word-break:break-word; overflow-wrap:anywhere; user-select:text;
+}
+.toolDetail code{ color:#9cc7ff; }
+.toolDetail pre{ margin:0 0 6px; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; }
+.toolDetail pre:last-child{ margin-bottom:0; }
+
+/* 工具调用卡片（大窗） */
+.toolcard{ width:100%; border:1px solid var(--border); border-radius:9px; background:var(--surface-2); overflow:hidden; }
+.toolcard__head{ display:flex; align-items:center; gap:7px; padding:7px 10px; min-width:0; }
+.toolcard__path{
+  font-size:11.5px; color:var(--text-2); min-width:0; flex:1; font-family:var(--mono);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.toolcard__st{ font-size:10.5px; flex-shrink:0; color:var(--muted); }
+.toolcard__body{
+  padding:8px 10px; font-size:11.5px; color:var(--muted); line-height:1.6;
+  border-top:1px dashed var(--border); word-break:break-word; overflow-wrap:anywhere; user-select:text;
+}
+.toolcard__body pre{ margin:0; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; }
+.st--running{ color:var(--accent); }
+.st--ok{ color:var(--success); }
+.st--err{ color:var(--danger); }
+
+/* 代码块（带语言标签 + 右上角「复制」） */
+.codeblock{ width:100%; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#0d1219; margin:0 0 8px; }
+.codeblock:last-child{ margin-bottom:0; }
+.codeblock__bar{ display:flex; align-items:center; gap:8px; padding:4px 9px; background:var(--surface-2); border-bottom:1px solid var(--border); }
+.codeblock__lang{ font-size:10.5px; color:var(--muted); font-family:var(--mono); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.codeblock__bar .btn{ margin-left:auto; flex-shrink:0; }
+.codeblock pre{ margin:0; padding:10px; overflow-x:auto; font-size:11.5px; line-height:1.65; color:#c9d6e4; user-select:text; }
+.codeblock pre code{ white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; background:none; padding:0; color:inherit; }
+
+/* 会话分段（大窗） */
+.tree{ display:flex; flex-direction:column; gap:12px; min-width:0; }
+.seg{ min-width:0; display:flex; flex-direction:column; gap:6px; }
+.seg__label{ font-size:10.5px; color:var(--muted); display:flex; align-items:center; gap:6px; min-width:0; }
+.turndivider{ font-size:10.5px; color:var(--muted); display:flex; align-items:center; gap:8px; }
+.turndivider::before,.turndivider::after{ content:''; flex:1; height:1px; background:var(--border); }
+
+/* ==========================================================================
+   7. ③ 大窗 960×680
+   ========================================================================== */
+#fullRoot{ padding:var(--gap); display:flex; }
+.full{
+  flex:1; min-width:0; min-height:0; display:flex; flex-direction:column;
+  background:var(--surface); border:1px solid var(--border-strong); border-radius:12px;
+  box-shadow:0 24px 54px rgba(0,0,0,.6); overflow:hidden;
+}
+.full__head{
+  flex-shrink:0; height:40px; display:flex; align-items:center; gap:9px; padding:0 12px;
+  background:var(--surface-2); border-bottom:1px solid var(--border);
+}
+.win__dot{ width:10px; height:10px; border-radius:50%; background:#4a545f; flex-shrink:0; }
+.win__dot--g{ background:#5ebd63; }
+.full__title{ font-size:12.5px; font-weight:700; flex-shrink:0; }
+.full__sub{
+  font-size:11px; color:var(--muted); min-width:0; flex:1;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.full__body{ flex:1; min-height:0; display:flex; min-width:0; }
+.full__col{ min-height:0; display:flex; flex-direction:column; min-width:0; }
+.full__col--sessions{ width:178px; flex-shrink:0; border-right:1px solid var(--border); background:var(--bg-2); }
+.full__col--tree{ flex:1; min-width:0; }
+.full__col--side{ width:204px; flex-shrink:0; border-left:1px solid var(--border); background:var(--bg-2); }
+.col__head{
+  flex-shrink:0; padding:9px 11px; font-size:11px; font-weight:700; color:var(--muted);
+  border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px;
+}
+.col__head .tag{ margin-left:auto; }
+.col__scroll{ flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:8px; }
+.col__note{ padding:8px 10px; font-size:10.5px; color:var(--muted); line-height:1.5; word-break:break-word; }
+
+.sess{
+  display:block; width:100%; text-align:left; padding:7px 8px; border-radius:8px;
+  border:1px solid transparent; color:var(--text-2); margin-bottom:4px;
+}
+.sess:hover{ background:var(--surface-2); }
+.sess[aria-pressed="true"]{ background:rgba(76,154,255,.13); border-color:rgba(76,154,255,.45); }
+.sess__t{ font-size:12px; color:var(--text); display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sess__m{ display:flex; align-items:center; gap:6px; margin-top:3px; font-size:10.5px; color:var(--muted); min-width:0; }
+.sess__m span:last-child{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sess:disabled{ cursor:not-allowed; }
+
+.sideblock{ padding:10px 11px; border-bottom:1px solid var(--border); min-width:0; }
+.sideblock__h{ font-size:10.5px; font-weight:700; color:var(--muted); margin-bottom:7px; display:flex; align-items:center; gap:6px; }
+.sideblock__h .tag{ margin-left:auto; }
+.segbtn{ display:flex; gap:4px; }
+.segbtn .btn{ flex:1; min-width:0; padding:4px 2px; font-size:11px; }
+.cost{ display:grid; gap:4px; font-size:11.5px; color:var(--text-2); }
+.cost__row{ display:flex; justify-content:space-between; gap:8px; min-width:0; }
+.cost__row span:first-child{ color:var(--muted); flex-shrink:0; }
+.cost__row span:last-child{ font-family:var(--mono); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cost__total{ color:#8fdda0; }
+.readonlyline{
+  font-size:11.5px; color:var(--text-2); font-family:var(--mono);
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+/* ==========================================================================
+   8. 空 / 加载 / 错误 三种边界态
+   ========================================================================== */
+.emptycard{
+  border:1px dashed var(--border-strong); border-radius:10px; background:var(--bg-2);
+  padding:10px 11px; display:flex; flex-direction:column; gap:7px;
+}
+.emptycard__t{ font-size:12.5px; font-weight:700; color:var(--text); }
+.emptycard__kv{ display:grid; grid-template-columns:auto minmax(0,1fr); gap:3px 8px; font-size:11px; }
+.emptycard__kv dt{ color:var(--muted); }
+.emptycard__kv dd{ margin:0; color:var(--text-2); min-width:0; word-break:break-word; overflow-wrap:anywhere; }
+.emptycard__kv dd code{ color:#9cc7ff; }
+.loadcard{
+  display:flex; flex-direction:column; gap:4px;
+  border:1px solid var(--border); border-radius:10px; background:var(--surface); padding:10px 11px;
+}
+.errkbd{ font-size:11px; color:var(--muted); line-height:1.6; word-break:break-word; }
+.errcode{ font-family:var(--mono); font-size:10.5px; color:#ff9d96; }
+
+/* ==========================================================================
+   9. 悬浮球右键菜单（球态窗口只有 48×48，放不下 —— 见 JS 注释：先把窗口撑到 mini 再弹）
+   ========================================================================== */
+.ballmenu{
+  position:absolute; left:10px; top:44px; width:196px; z-index:120;
+  background:var(--surface); border:1px solid var(--border-strong); border-radius:9px;
+  box-shadow:0 18px 44px rgba(0,0,0,.66); padding:5px;
+}
+.ballmenu__item{ display:block; width:100%; text-align:left; padding:6px 9px; border-radius:6px; font-size:12px; color:var(--text-2); }
+.ballmenu__item:hover{ background:var(--surface-3); color:var(--text); }
+.ballmenu__hint{ font-size:10.5px; color:var(--muted); padding:5px 9px 3px; border-top:1px solid var(--border); margin-top:4px; line-height:1.45; }
+
+/* ==========================================================================
+   10. Toast
+   ========================================================================== */
+#toastHost{
+  position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:400;
+  /* column（不是 column-reverse）：新 toast 追加在最后 = 最靠下，离输入框最近 */
+  display:flex; flex-direction:column; align-items:center; gap:6px;
+  pointer-events:none; max-width:min(92vw, 520px);
+}
+.toast{
+  padding:7px 13px; border-radius:999px; font-size:12px; color:#e8f1ff;
+  background:rgba(28,38,50,.97); border:1px solid var(--border-strong);
+  box-shadow:0 14px 34px rgba(0,0,0,.6); animation:toastIn .18s ease-out;
+  max-width:100%; word-break:break-word; overflow-wrap:anywhere;
+}
+.toast--warn{ border-color:rgba(227,179,65,.6); color:#ffe6a3; }
+.toast--err{ border-color:rgba(248,81,73,.6); color:#ffd0cc; }
+
+/* ==========================================================================
+   11. mock 模式控制台（只在浏览器直开、无 window.minipi 时显示）
+   ========================================================================== */
+#mockPanel{
+  position:fixed; left:12px; bottom:12px; z-index:500; width:290px;
+  background:rgba(14,19,26,.97); border:1px solid var(--border-strong); border-radius:11px;
+  box-shadow:0 20px 50px rgba(0,0,0,.7); display:flex; flex-direction:column; overflow:hidden;
+  font-size:11px;
+}
+#mockPanel header{
+  padding:8px 10px; background:var(--surface-2); border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:7px; font-size:11.5px; font-weight:700; color:var(--text);
+}
+#mockPanel header .chip{ margin-left:auto; }
+#mockPanel .mp__body{ padding:8px 10px 10px; display:flex; flex-direction:column; gap:8px; max-height:70vh; overflow-y:auto; }
+#mockPanel .mp__row{ display:flex; gap:5px; flex-wrap:wrap; }
+#mockPanel .mp__g{ font-size:10px; font-weight:700; color:var(--muted); letter-spacing:.3px; }
+#mockPanel .mp__hint{ font-size:10px; color:var(--muted); line-height:1.45; word-break:break-word; }
+#mockPanel .btn{ padding:4px 7px; font-size:10.5px; }
+</style>
+</head>
+<body data-mode="ball">
+
+<div id="stage" aria-label="minipi 界面舞台">
+
+  <!-- ===================== ① 球 48×48 ===================== -->
+  <div class="modeRoot" id="ballRoot" data-ball="idle">
+    <button class="ball" id="ball" type="button" aria-haspopup="menu" aria-expanded="false"
+            aria-label="minipi 悬浮球，当前状态：空闲">
+      <span class="ball__core" aria-hidden="true">π</span>
+      <span class="ball__badge" aria-hidden="true"></span>
+    </button>
+  </div>
+
+  <!-- 菜单挂在 #stage 下而不是球里面：球态窗口只有 48×48，装不下菜单，
+       所以右键会把窗口先撑到 mini 再弹菜单（详见脚本注释）。 -->
+  <div class="ballmenu" id="ballMenu" role="menu" aria-label="悬浮球菜单" hidden>
+    <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="new">新会话</button>
+    <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="hide30">隐藏 30 分钟</button>
+    <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="full">打开大窗</button>
+    <button class="ballmenu__item" type="button" role="menuitem" data-ballmenu="quit">退出</button>
+    <div class="ballmenu__hint" id="ballMenuHint">球态窗口只有 48×48，放不下菜单。</div>
+  </div>
+
+  <!-- ===================== ② 小窗 360×480 ===================== -->
+  <div class="modeRoot" id="miniRoot" hidden>
+    <section class="mini" aria-label="minipi 小窗">
+      <header class="mini__head dragbar">
+        <span class="win__dot win__dot--g" aria-hidden="true"></span>
+        <span class="mini__title">minipi</span>
+        <span class="chip chip--quick mini__sceneChip" id="miniSceneChip">quick</span>
+        <span class="mini__spacer"><span class="mini__dragHint">可拖动 · 位置记忆</span></span>
+        <button class="btn btn--sm" type="button" id="btnMiniMenu" aria-haspopup="menu" aria-expanded="false"
+                title="打开菜单（新会话 / 隐藏 30 分钟 / 打开大窗 / 退出）">菜单</button>
+        <button class="btn btn--sm" type="button" id="btnEnlarge" title="放大为大窗（同一会话，不重连、不重放）">⤢ 放大</button>
+        <button class="btn btn--ghost btn--sm" type="button" id="btnMiniCollapse" title="收起回球">收起</button>
+      </header>
+
+      <div class="badgebar" id="miniBadge" hidden></div>
+
+      <!-- 审批横幅：M4 才接（本期「明确不做」）。DOM 位置与样式已留好，恒 hidden。 -->
+      <div class="banner" id="miniBanner" hidden>
+        <span class="banner__text" id="bannerText">⚠ 等待你确认 1 个操作</span>
+        <button class="btn btn--warn btn--sm" type="button" id="btnBannerExpand">展开</button>
+      </div>
+
+      <div class="mini__body" id="miniBody">
+        <div class="mini__note" style="color:#4a5563">正在初始化…</div>
+      </div>
+
+      <footer class="mini__foot">
+        <label class="sr-only" for="miniInput">向 Pi 提问</label>
+        <textarea class="mini__input" id="miniInput" rows="2" placeholder="问点什么…（Enter 发送 / Shift+Enter 换行）" spellcheck="false"></textarea>
+        <div class="mini__footmeta">
+          <span class="kbd-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行 · <kbd>Esc</kbd> 收起</span>
+          <span class="chip chip--warn" id="queueChip" hidden aria-live="polite"></span>
+        </div>
+        <div class="mini__footrow">
+          <button class="btn btn--danger btn--sm" type="button" id="btnAbort" disabled>中断</button>
+          <button class="btn btn--primary btn--sm" type="button" id="btnSend">发送</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <!-- ===================== ③ 大窗 960×680 ===================== -->
+  <div class="modeRoot" id="fullRoot" hidden>
+    <section class="full" aria-label="minipi 大窗">
+      <header class="full__head dragbar">
+        <span class="win__dot win__dot--g" aria-hidden="true"></span>
+        <span class="full__title">minipi · 工作台</span>
+        <span class="full__sub" id="fullSub">—</span>
+        <button class="btn btn--sm" type="button" id="btnCollapse" title="收起为小窗，流不中断">⤡ 收起</button>
+      </header>
+
+      <div class="full__body">
+        <!-- 会话列表：本期契约没有「列出 / 切换 / 恢复会话」接口 —— 只做当前会话展示 + 新会话 -->
+        <aside class="full__col full__col--sessions" aria-label="会话列表">
+          <div class="col__head">会话列表 <span class="tag">本期仅当前</span></div>
+          <!-- 会话切换占位：契约无 listSessions / restoreSession，见「未完成项」 -->
+          <div class="col__scroll">
+            <button class="sess" type="button" id="sessCurrent" aria-pressed="true">
+              <span class="sess__t" id="sessTitle">当前会话</span>
+              <span class="sess__m"><span class="chip chip--quick" id="sessSceneChip">quick</span><span id="sessMeta">—</span></span>
+            </button>
+          </div>
+          <div class="col__note">契约里没有会话列表 / 切换 / 恢复接口，故本期只显示当前会话。</div>
+          <div style="padding:8px">
+            <button class="btn btn--ghost btn--sm btn--block" type="button" id="btnNewSession">＋ 新会话</button>
+          </div>
+        </aside>
+
+        <section class="full__col full__col--tree" aria-label="会话树">
+          <div class="col__head">会话树（思考段 + 工具调用卡片） <span class="tag">全量</span></div>
+          <div class="col__scroll"><div class="tree" id="fullTree"></div></div>
+        </section>
+
+        <aside class="full__col full__col--side" aria-label="会话信息">
+          <div class="sideblock">
+            <div class="sideblock__h">模型 <span class="tag">只读</span></div>
+            <div class="readonlyline" id="fullModel" title="契约里没有「切换模型」接口，本期只读">—</div>
+          </div>
+          <div class="sideblock">
+            <div class="sideblock__h">场景（切换会新建会话）</div>
+            <div class="segbtn" role="group" aria-label="切换场景">
+              <button class="btn btn--sm" type="button" data-scene="quick" aria-pressed="true">quick</button>
+              <button class="btn btn--sm" type="button" data-scene="note" aria-pressed="false">note</button>
+              <button class="btn btn--sm" type="button" data-scene="desk" aria-pressed="false">desk</button>
+              <button class="btn btn--sm" type="button" data-scene="repo" aria-pressed="false">repo</button>
+            </div>
+            <p class="mini__note" id="sceneNote" style="margin-top:7px">—</p>
+          </div>
+          <div class="sideblock">
+            <div class="sideblock__h">本次成本 <span class="tag">sessionState</span></div>
+            <div class="cost">
+              <div class="cost__row"><span>会话</span><span id="costSession">—</span></div>
+              <div class="cost__row"><span>消息数</span><span id="costMsgs">—</span></div>
+              <div class="cost__row"><span>lastSeq</span><span id="costSeq">—</span></div>
+              <div class="cost__row"><span>预估金额</span><span class="cost__total" id="costUsd">—</span></div>
+            </div>
+          </div>
+          <div class="sideblock" style="border-bottom:0">
+            <div class="sideblock__h">seq 幂等</div>
+            <div class="cost">
+              <div class="cost__row"><span>已收事件</span><span id="seqSeen">0</span></div>
+              <div class="cost__row"><span>丢弃重复</span><span id="seqDupes">0</span></div>
+              <div class="cost__row"><span>跳号次数</span><span id="seqGaps">0</span></div>
+            </div>
+            <p class="mini__note" style="margin-top:6px">事件按 seq 幂等入队；跳号容忍并记录，重复直接丢弃。</p>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- mock 模式控制台（无 window.minipi 时显示；方便单独验收 UI） -->
+<aside id="mockPanel" hidden aria-label="mock 模式控制台">
+  <header>mock 控制台 <span class="chip chip--note" id="mockModeChip">ball</span></header>
+  <div class="mp__body">
+    <div class="mp__g">① 形态（模拟主进程 setBounds + onWindowState）</div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="mode-ball">球 48×48</button>
+      <button class="btn" type="button" data-mock="mode-mini">小窗 360×480</button>
+      <button class="btn" type="button" data-mock="mode-full">大窗 960×680</button>
+    </div>
+    <div class="mp__g">② 球子状态</div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="ball-idle">空闲</button>
+      <button class="btn" type="button" data-mock="ball-thinking">思考中</button>
+      <button class="btn" type="button" data-mock="ball-unread">未读</button>
+      <button class="btn" type="button" data-mock="ball-await">待确认</button>
+    </div>
+    <div class="mp__g">③ 事件流</div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="stream">触发一轮流式</button>
+      <button class="btn" type="button" data-mock="tool">工具调用</button>
+      <button class="btn" type="button" data-mock="fail">失败一轮</button>
+      <button class="btn" type="button" data-mock="abort">中断</button>
+    </div>
+    <div class="mp__g">④ 会话 / 边界态</div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="conn-loading">连接中</button>
+      <button class="btn" type="button" data-mock="conn-error">连接失败</button>
+      <button class="btn" type="button" data-mock="reset">回到空状态</button>
+      <button class="btn" type="button" data-mock="newsession">新会话</button>
+    </div>
+    <div class="mp__g">⑤ 模拟热键（模拟主进程 onHotkey 推送）</div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="hk-toggle">toggle</button>
+      <button class="btn" type="button" data-mock="hk-grab-ok">抓选区成功</button>
+      <button class="btn" type="button" data-mock="hk-grab-fail">抓选区失败</button>
+    </div>
+    <div class="mp__g">⑥ 产出卡片（模拟主进程 onOutcome 推送）</div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="outcome-docx">产出 docx</button>
+      <button class="btn" type="button" data-mock="outcome-md">产出降级 md</button>
+      <button class="btn" type="button" data-mock="outcome-inline">落盘失败（可复制）</button>
+    </div>
+    <div class="mp__hint">产出卡片贴在对话流里（和工具卡同一层）。先确保已有会话；无会话也能挂到独立一轮。</div>
+    <div class="mp__g">⑦ 审批卡（模拟主进程 onApproval 推送，M4.5）</div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="approval-write">write 卡</button>
+      <button class="btn" type="button" data-mock="approval-edit">edit 卡（diff）</button>
+      <button class="btn" type="button" data-mock="approval-command">command 卡（高危）</button>
+      <button class="btn" type="button" data-mock="approval-mixed">合并卡（3 项）</button>
+    </div>
+    <div class="mp__row">
+      <button class="btn" type="button" data-mock="approval-short">短超时（8s，看倒计时）</button>
+      <button class="btn" type="button" data-mock="approval-update">就地更新一张</button>
+      <button class="btn" type="button" data-mock="approval-cancel-all">撤回全部</button>
+    </div>
+    <div class="mp__hint">三类模板 + 倒计时 + 三按钮（允许一次 / 拒绝 / 中断整轮）+「本会话总是允许」（默认不勾，仅对「允许一次」生效）。「短超时」用于观察到 0 置灰显示「已超时，已拒绝」并等 cancel 撤回。</div>
+    <div class="mp__hint">mock 模式（未连接宿主）：本页在没有 <code>window.minipi</code> 时自动进入，用假事件流演示 UI。棋盘格 = 透明窗口区域。</div>
+  </div>
+</aside>
+
+<div id="toastHost" aria-live="polite" aria-atomic="false"></div>
+
+<script type="module">
+/* ============================================================================
+ * minipi 渲染层
+ * ----------------------------------------------------------------------------
+ * 不变量（§4.1 实现要求 1/2/3，整个方案的头号纪律）：
+ *   1. 只有一个 store；事件按 seq 幂等入队；所有视图都是 store 的选择器。
+ *   2. 形态切换（ball/mini/full）**不重建 DOM、不重连、不清空、不重放**：
+ *      三个形态容器一直在 DOM 里，切换只改 `hidden`。
+ *   3. 小窗渲染的是「当前这一轮」（一个 turn 含 思考 → 工具 → 答案 多段），
+ *      不是「最后一条消息」。
+ * 渲染驱动：requestAnimationFrame + 100ms 定时器兜底
+ *   （主进程已设 backgroundThrottling:false；这里再兜一层，不依赖「每个事件都改 DOM」）。
+ * ========================================================================== */
+
+/* ==========================================================================
+ * A. 契约镜像（逐字对齐 src/shared/protocol.js；本文件不可 import 它，原因见文件头）
+ * ========================================================================== */
+const PROTOCOL_VERSION = '0.1.0';
+const WINDOW_STATE = Object.freeze({ BALL: 'ball', MINI: 'mini', FULL: 'full' });
+const MODE_LABEL = Object.freeze({ ball: '球', mini: '小窗', full: '大窗' });
+
+const SCENE_DEFS = Object.freeze({
+  quick: Object.freeze({
+    sceneId: 'quick', label: 'quick',
+    cwdTemplate: '~/.minipi/outbox',
+    toolAllowlist: Object.freeze([]),
+    noTools: 'all', sessionManagerMode: 'memory',
+    description: '随手一问：概念、报错、翻译、改写。无工具可用、不落盘。',
+  }),
+  note: Object.freeze({
+    sceneId: 'note', label: 'note',
+    cwdTemplate: '~/.minipi/outbox',
+    toolAllowlist: Object.freeze(['read', 'write', 'grep', 'find', 'ls']),
+    noTools: null, sessionManagerMode: 'disk',
+    description: '读长文/PDF、写笔记。可写，但只写得进 outbox；无 bash / edit。',
+  }),
+  desk: Object.freeze({
+    sceneId: 'desk', label: 'desk',
+    cwdTemplate: '~/.minipi/outbox',
+    toolAllowlist: Object.freeze(['read', 'write', 'grep', 'find', 'ls']),
+    noTools: null, sessionManagerMode: 'disk',
+    description: '日常办公产出：纪要、周报、提纲。落盘到 outbox；无 bash / edit。',
+  }),
+  repo: Object.freeze({
+    sceneId: 'repo', label: 'repo',
+    cwdTemplate: '~/.minipi/repo',
+    toolAllowlist: Object.freeze(['read', 'write', 'edit', 'grep', 'find', 'ls', 'bash', 'powershell']),
+    noTools: null, sessionManagerMode: 'disk',
+    description: '「这个报错去帮我改代码」。唯一全量工具 + 唯一可改仓库，走审批闸门。',
+  }),
+});
+const SCENE_IDS = Object.freeze(Object.keys(SCENE_DEFS));
+const DEFAULT_SCENE_ID = 'quick';
+/** 产出落在 outbox 沙箱内的场景（`repo` 是唯一例外）。 */
+const OUTBOX_SCENES = Object.freeze(['quick', 'note', 'desk']);
+
+/* ---- 产出卡片契约镜像（逐字对齐 protocol.js 的 OUTCOME_* / LIMITS，见方案 §3.4） ----
+   ⚠ 这几个常量在多处被用到（chip 类名、按钮文案、文件名截断长度），
+     若将来 protocol.js 改了取值，这里必须同步改（已由 scripts/check-scene-consistency.mjs
+     的同类约束守住场景名部分；产出相关字段目前靠人工对齐）。 */
+const OUTCOME_FORMAT = Object.freeze({ MD: 'md', DOCX: 'docx' });
+const OUTCOME_FORMAT_IDS = Object.freeze(Object.values(OUTCOME_FORMAT));
+/** 卡片三按钮（本期固定，不开放扩展）。 */
+const OUTCOME_ACTIONS = Object.freeze(['open', 'saveAs', 'revise']);
+/** 产出物上限（只用到标题长度：决定文件名中间截断的 maxChars）。 */
+const OUTCOME_TITLE_MAX_CHARS = 120;
+
+/* ---- 审批卡契约镜像（逐字对齐 protocol.js 的 APPROVAL_* / LIMITS，审批设计 §9.3） ----
+   ⚠ 按钮**恒以 card.actions 为准**（服务端才是定义方），下面这份用于：
+     · 校验 / 兜底（服务端没给 actions 时按它画）；
+     · 倒计时秒数换算（timeoutMs）。
+   ⚠ 渲染层**绝不重算 diff、绝不读盘** —— diff 一律用服务端 `buildEditDiff` 的结果。 */
+const APPROVAL_ACTIONS = Object.freeze(['allowOnce', 'deny', 'terminate']);
+const APPROVAL_ACTION_IDS = APPROVAL_ACTIONS;
+/** 审批等待上限（毫秒）；卡自带 timeoutMs 时以卡为准，这里仅兜底。 */
+const APPROVAL_TIMEOUT_MS = 300000;
+/** 三按钮中文文案（术语固定：允许一次 / 拒绝 / 中断整轮）。 */
+const APPROVAL_ACTION_LABEL = Object.freeze({
+  allowOnce: '允许一次',
+  deny: '拒绝',
+  terminate: '中断整轮',
+});
+const APPROVAL_KIND_LABEL = Object.freeze({
+  write: '写入文件',
+  edit: '修改文件',
+  command: '执行命令',
+});
+
+const ERROR_CODES = Object.freeze({
+  INVALID_ARGUMENT: 'INVALID_ARGUMENT',
+  SESSION_NOT_FOUND: 'SESSION_NOT_FOUND',
+  SCENE_NOT_FOUND: 'SCENE_NOT_FOUND',
+  SESSION_BUSY: 'SESSION_BUSY',
+  PROMPT_REQUIRES_BEHAVIOR: 'PROMPT_REQUIRES_BEHAVIOR',
+  PI_UNAVAILABLE: 'PI_UNAVAILABLE',
+  INTERNAL: 'INTERNAL',
+  /* 产出链路（v0.4，protocol.js 同步） */
+  OUTCOME_JSON_INVALID: 'OUTCOME_JSON_INVALID',
+  OUTCOME_RENDER_FAILED: 'OUTCOME_RENDER_FAILED',
+  OUTCOME_WRITE_FAILED: 'OUTCOME_WRITE_FAILED',
+  OUTCOME_NOT_FOUND: 'OUTCOME_NOT_FOUND',
+  /* 沙箱拦截（v0.4，protocol.js 同步）—— 缺了它会被 parseErrorMessage 降级成 INTERNAL，错误归类错 */
+  SANDBOX_DENIED: 'SANDBOX_DENIED',
+  /* M4 审批闸门（审批设计 §9.1 / §5；protocol.js 同步）—— 同理会降级成 INTERNAL，必须镜像 */
+  APPROVAL_TIMEOUT: 'APPROVAL_TIMEOUT',
+  APPROVAL_DENIED: 'APPROVAL_DENIED',
+  APPROVAL_NOT_FOUND: 'APPROVAL_NOT_FOUND',
+});
+
+function errorMessage(code, detail) {
+  const c = String(code || ERROR_CODES.INTERNAL);
+  const d = String(detail || '').trim() || '未提供说明';
+  return `${c}: ${d}`;
+}
+
+/** 拆开 `"<CODE>: <说明>"`（与 protocol.js 同逻辑）。 */
+function parseErrorMessage(input) {
+  const raw = input instanceof Error ? input.message : String(input ?? '');
+  const tail = raw.replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+  const idx = tail.indexOf(': ');
+  if (idx > 0) {
+    const code = tail.slice(0, idx);
+    if (Object.values(ERROR_CODES).includes(code)) return { code, detail: tail.slice(idx + 2) };
+  }
+  return { code: ERROR_CODES.INTERNAL, detail: tail };
+}
+
+function isSceneId(v) { return typeof v === 'string' && Object.prototype.hasOwnProperty.call(SCENE_DEFS, v); }
+
+function sceneToolsLabel(sceneId) {
+  const sc = SCENE_DEFS[sceneId] || SCENE_DEFS[DEFAULT_SCENE_ID];
+  if (sc.noTools === 'all') return '无（noTools: "all"）';
+  return sc.toolAllowlist.join(' · ');
+}
+
+/* 事件字段名映射（protocol.js 的 toolArgsOf：事件流侧是 args，扩展侧才是 input） */
+function toolArgsOf(ev) {
+  if (!ev || typeof ev !== 'object') return null;
+  if (ev.args !== undefined) return ev.args;
+  if (ev.input !== undefined) return ev.input;
+  return null;
+}
+
+/**
+ * message_update 的子事件。
+ * ⚠ 契约（protocol.js / scripts/probe/stub.html / verify-stream 实测）里字段是
+ *   `event.assistantMessageEvent.{type,delta}`；任务书里写的是
+ *   `assistantEventType` / `textDelta`。两套都兼容，主用契约那套。
+ */
+function assistantSub(ev) {
+  if (!ev) return null;
+  const a = ev.assistantMessageEvent;
+  if (a && typeof a === 'object' && typeof a.type === 'string') {
+    return { type: a.type, delta: typeof a.delta === 'string' ? a.delta : '' };
+  }
+  if (typeof ev.assistantEventType === 'string') {
+    const d = typeof ev.textDelta === 'string' ? ev.textDelta
+      : (typeof ev.delta === 'string' ? ev.delta : '');
+    return { type: ev.assistantEventType, delta: d };
+  }
+  if (a && typeof a === 'string') {
+    return { type: a, delta: typeof ev.textDelta === 'string' ? ev.textDelta : '' };
+  }
+  return null;
+}
+
+/** 排队条数（protocol.js：steering/followUp 是「尚未投递的文本数组」，投递后被移出 ⇒ 先升后降）。 */
+function queuedCount(ev) {
+  if (!ev || ev.type !== 'queue_update') return 0;
+  const s = Array.isArray(ev.steering) ? ev.steering.length : 0;
+  const f = Array.isArray(ev.followUp) ? ev.followUp.length : 0;
+  return s + f;
+}
+
+/** 从 Pi 的 message 对象里尽力取纯文本（不改名、只读常见形状）。 */
+function messageText(msg) {
+  if (!msg) return '';
+  const c = msg.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    return c.map((p) => {
+      if (typeof p === 'string') return p;
+      if (p && typeof p === 'object' && typeof p.text === 'string') return p.text;
+      return '';
+    }).join('');
+  }
+  return '';
+}
+
+/* ==========================================================================
+ * B. 小工具
+ * ========================================================================== */
+const $ = (sel, root) => (root || document).querySelector(sel);
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = String(text);
+  return n;
+}
+
+/** 只对**文本内容**做 HTML 转义；模型文本一律先转义再拼，绝不直接 innerHTML。 */
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function clampText(s, max) {
+  const str = String(s ?? '');
+  return str.length > max ? `${str.slice(0, max)}\n…（已截断，共 ${str.length} 字符）` : str;
+}
+
+function fmtUsd(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+  if (v === 0) return '$0';
+  if (v < 0.01) return `$${v.toFixed(6)}`;
+  return `$${v.toFixed(4)}`;
+}
+
+function fmtMs(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * 字节数 → 人类可读（产出卡片第三行的「文件大小」）。
+ * 规则：
+ *   · 1024 进制（KB / MB / GB）；1 KB 以下显示整数字节 `123 B`；
+ *   · KB 保留一位小数（`8.4 KB`）；MB / GB 保留两位（`1.23 MB`）；
+ *   · 负 / 非数字 → `—`（不抛，调用方直接展示）。
+ * @param {number} n
+ * @returns {string}
+ */
+function formatBytes(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return '—';
+  if (n < 1024) return `${Math.round(n)} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(2)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
+/**
+ * 时间戳 → `HH:MM`（产出卡片第三行的「时间」）。
+ * 用本地时区，24 小时制，两位补零。非法输入 → `—`。
+ * @param {number} ts
+ * @returns {string}
+ */
+function formatClock(ts) {
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return '—';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+/**
+ * 把字符串切成**字素簇（grapheme cluster）**数组 —— 中间截断的最小不可分单位。
+ *
+ * 为什么必须按字素簇切：`.slice()` 是按 **UTF-16 码元**切。
+ *   · emoji（`👍` = `\uD83D\uDC4D` 代理对）被切在中间 → 产生**孤立代理项** → 渲染出 `�`；
+ *   · 组合字符（`é` = `e` + U+0301）被切开 → 重音符号丢失/漂到别处；
+ *   · ZWJ 序列（`👨‍👩‍👧‍👦`）被切开 → 一家人散架成几个单 emoji；
+ *   · 国旗（`🇨🇳` = 两个区域指示符）被切开 → 变成两个「C」「N」字母框。
+ * 正解是用 `Intl.Segmenter(granularity:"grapheme")` 做**字素簇**切分。
+ *
+ * **降级路径**：`Intl.Segmenter` 在旧环境（老 Node / 旧 Chromium）可能缺失 →
+ * 退回 `Array.from(str)`（按**码点**切）。按码点切**至少不会劈代理对**（`Array.from`
+ * 会把 `👍` 当一个单位），但**仍会劈开 ZWJ 序列 / 组合字符** —— 比 `slice` 强、但不是完美解。
+ * 这条降级是**保底**：宁可少截一个 emoji，也不能产出乱码。
+ *
+ * @param {string} str
+ * @returns {string[]} 每个元素是一个字素簇（不可再分）
+ */
+function splitGraphemes(str) {
+  const s = String(str ?? '');
+  if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+    try {
+      const seg = new Intl.Segmenter('und', { granularity: 'grapheme' });
+      return Array.from(seg.segment(s), (x) => x.segment);
+    } catch { /* Segmenter 存在但构造失败 → 落码点降级 */ }
+  }
+  // 降级：按码点切（不劈代理对，但会劈 ZWJ / 组合字符）
+  return Array.from(s);
+}
+
+/**
+ * 文件名**中间截断**（360 小窗硬约束的核心工具，方案 §3.4 / impl-plan T1.3）。
+ *
+ * 为什么要中间截断而不是尾部截断：尾部截断会把扩展名 `.docx` 也吃掉，
+ * 用户看不到「这是 Word 还是 Markdown」，直接丢失关键信息。
+ *
+ * 规则（**按字素簇计数**，见 `splitGraphemes`）：
+ *   1. 字素簇数 ≤ maxChars → 原样返回；
+ *   2. 拆出扩展名（最后一个 `.` 之后，且该 `.` 不在开头、右侧无分隔符）；
+ *   3. **扩展名本身 ≥ maxChars**（极长扩展名）→ 退化**尾部截断**（保头，`…` 省略中间无从谈起）；
+ *   4. 常规：左右各留一部分、中间用 `…` 连接，**扩展名完整保留**；
+ *   5. **emoji / 组合字符 / ZWJ 序列 / 国旗都是 1 个单位**（不劈开）；
+ *      **中文按 1 字算**（中文字符天然是 1 个字素簇，符合预期）。
+ *
+ * 例（maxChars=20）：`周报-2026-09-23.docx`（19 字符）→ 原样返回；
+ *                   `周报-2026-09-23-最终版.docx`（23 字符）→ 中间省略、`.docx` 保留。
+ *
+ * ⚠ 计数的「单位」是**字素簇**而不是 UTF-16 码元，所以含 emoji 时
+ *   返回串的 `.length`（码元数）可能 > maxChars —— 这是**刻意**的：
+ *   保证「不劈开字素」优先于「严格 ≤ max 码元」。CSS 侧还有单行省略兜底。
+ *
+ * @param {string} name
+ * @param {number} maxChars 结果允许的**最大字素簇数**（含 `…` 与扩展名）
+ * @returns {string}
+ */
+function middleTruncate(name, maxChars) {
+  const s = String(name ?? '');
+  const max = Math.max(1, Math.floor(Number(maxChars) || 0));
+  // 先按字素簇切分；后续所有「数一数、切一段」都在字素簇上进行
+  const units = splitGraphemes(s);
+  if (units.length <= max) return s;
+
+  // 找扩展名：最后一个 '.' 的位置（且不是首字符、右侧不含路径分隔符）。
+  // 用**码元下标**找 `.`（`. ` 是 ASCII，不会落在代理对中间），再换算成字素簇下标。
+  const dot = s.lastIndexOf('.');
+  let extU = [];                 // 扩展名（字素簇数组，含 '.'）
+  let baseU = units;             // 主名（字素簇数组）
+  if (dot > 0 && dot < s.length - 1 && !/[\\/]/.test(s.slice(dot))) {
+    const extStr = s.slice(dot);
+    extU = splitGraphemes(extStr);
+    baseU = splitGraphemes(s.slice(0, dot));
+  }
+
+  // 极长扩展名：扩展名自己就占满（甚至超过）max ⇒ 无法同时保留 `…` + 扩展名。
+  // 退化**尾部截断**（保头，至少能看到开头）；⚠ 也必须按字素簇切，否则又劈 emoji。
+  // 阈值用 `extU.length >= max`（而不是 `+1 >=`）：只要还能挤出 1 个字素给 `…`，
+  // 就走常规路径保扩展名可见 —— 扩展名可见是这条函数的**首要目标**。
+  if (extU.length >= max) {
+    // 退化**尾部截断**：保留**整串头部**（含扩展名的前几个字素）。
+    // ⚠ 这里刻意用 `units`（整串）而不是 `baseU`（去扩展名）：
+    //   极长扩展名的场景（如 `x.veryveryverylongextension`）用户仍想看到开头的 `x.` 与扩展名前缀，
+    //   这是 v1 已有行为，**回归不许变**。按字素簇切，不会劈 emoji。
+    return `${units.slice(0, max - 1).join('')}…`;
+  }
+
+  // 常规：总长 = 前段 + '…' + 后段 + 扩展名 = max（都以字素簇计）
+  // room 可能为 0（如 `👍👍👍👍.docx` @6，扩展名占 5、只剩 0 给主名）→ 结果 `…docx`，
+  // 这是**正确**的：扩展名可见优先，主名让位。
+  const room = max - 1 - extU.length;      // 留给 base 前/后段的字素簇数
+  const headLen = Math.ceil(room / 2);
+  const tailLen = room - headLen;
+  const head = baseU.slice(0, headLen).join('');
+  const tail = tailLen > 0 ? baseU.slice(baseU.length - tailLen).join('') : '';
+  return `${head}…${tail}${extU.join('')}`;
+}
+
+const toastHost = $('#toastHost');
+function toast(msg, kind) {
+  const t = el('div', 'toast' + (kind ? ` toast--${kind}` : ''), msg);
+  t.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+  toastHost.appendChild(t);
+  setTimeout(() => { if (t.parentNode) t.remove(); }, 3600);
+  while (toastHost.children.length > 3) toastHost.firstElementChild.remove();
+}
+
+/* ==========================================================================
+ * C. 零依赖 Markdown（段落 / 标题 / 代码块+复制 / 行内代码 / 列表 / 粗体 / 链接）
+ *    XSS 防护：模型文本先 escapeHtml 再拼；链接协议白名单；
+ *    绝不把模型文本直接 innerHTML。
+ * ========================================================================== */
+function sanitizeHref(raw) {
+  const h = String(raw ?? '').trim();
+  if (!h) return null;
+  const lower = h.toLowerCase();
+  if (/^(https?:|mailto:|\/|\.\/|\.\.\/|#)/.test(lower)) return h;
+  if (/^[a-z][a-z0-9+.-]*:/.test(lower)) return null; // javascript: / data: / vbscript: … 一律拒绝
+  return `./${h}`;
+}
+
+/** 入参必须是**已转义**的文本；只插入我们自己控制的标签。 */
+function inlineHTML(escaped) {
+  const codes = [];
+  let out = String(escaped);
+  out = out.replace(/`([^`\n]+)`/g, (_m, c) => {
+    codes.push(c);
+    return `\u0000${codes.length - 1}\u0000`;
+  });
+  out = out.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_m, label, href) => {
+    const safe = sanitizeHref(href);
+    if (!safe) return label;
+    return `<a href="${safe}" rel="noreferrer noopener" data-extlink="1" title="${safe}">${label}</a>`;
+  });
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  out = out.replace(/\u0000(\d+)\u0000/g, (_m, i) => `<code>${codes[Number(i)]}</code>`);
+  return out;
+}
+
+const copyRegistry = new WeakMap();
+
+function buildCodeBlock(lang, code) {
+  const box = el('div', 'codeblock');
+  const bar = el('div', 'codeblock__bar');
+  bar.appendChild(el('span', 'codeblock__lang', lang ? String(lang) : 'text'));
+  const btn = el('button', 'btn btn--ghost btn--sm', '复制');
+  btn.type = 'button';
+  btn.setAttribute('data-copy', '1');
+  btn.setAttribute('aria-label', `复制这段${lang ? ` ${lang} ` : ''}代码`);
+  copyRegistry.set(btn, code);
+  bar.appendChild(btn);
+  const pre = el('pre');
+  const c = el('code', null, code); // textContent —— 不解析
+  pre.appendChild(c);
+  box.appendChild(bar);
+  box.appendChild(pre);
+  return box;
+}
+
+/** 把一段 markdown 源文本渲染成 DocumentFragment（全程用 DOM API，不 innerHTML 模型文本）。 */
+function renderMarkdown(src) {
+  const frag = document.createDocumentFragment();
+  const lines = String(src ?? '').split(/\r?\n/);
+  let para = [];
+  let i = 0;
+
+  const flushPara = () => {
+    if (!para.length) return;
+    const p = el('p');
+    p.innerHTML = inlineHTML(escapeHtml(para.join('\n')));
+    frag.appendChild(p);
+    para = [];
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    const fence = /^\s*(?:```|~~~)\s*([A-Za-z0-9+#._-]*)\s*$/.exec(line);
+    if (fence) {
+      flushPara();
+      const lang = fence[1] || '';
+      const body = [];
+      i += 1;
+      while (i < lines.length && !/^\s*(?:```|~~~)\s*$/.test(lines[i])) { body.push(lines[i]); i += 1; }
+      i += 1;
+      frag.appendChild(buildCodeBlock(lang, body.join('\n')));
+      continue;
+    }
+
+    if (/^\s*$/.test(line)) { flushPara(); i += 1; continue; }
+
+    const h = /^\s*(#{1,6})\s+(.*)$/.exec(line);
+    if (h) {
+      flushPara();
+      const lvl = h[1].length <= 2 ? 3 : 4;
+      const node = el(`h${lvl}`);
+      node.innerHTML = inlineHTML(escapeHtml(h[2]));
+      frag.appendChild(node);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushPara(); frag.appendChild(el('hr')); i += 1; continue; }
+
+    if (/^\s*>/.test(line)) {
+      flushPara();
+      const bq = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) { bq.push(lines[i].replace(/^\s*>\s?/, '')); i += 1; }
+      const node = el('blockquote');
+      node.innerHTML = inlineHTML(escapeHtml(bq.join('\n')));
+      frag.appendChild(node);
+      continue;
+    }
+
+    if (/^\s*(?:[-*+]|\d+\.)\s+/.test(line)) {
+      flushPara();
+      const ul = el('ul');
+      while (i < lines.length && /^\s*(?:[-*+]|\d+\.)\s+/.test(lines[i])) {
+        const item = el('li');
+        item.innerHTML = inlineHTML(escapeHtml(lines[i].replace(/^\s*(?:[-*+]|\d+\.)\s+/, '')));
+        ul.appendChild(item);
+        i += 1;
+      }
+      frag.appendChild(ul);
+      continue;
+    }
+
+    para.push(line);
+    i += 1;
+  }
+  flushPara();
+  return frag;
+}
+
+/* ==========================================================================
+ * D. 单一 store（视图只是选择器）
+ * ========================================================================== */
+const store = {
+  mock: false,
+  mode: 'ball',                 // ball | mini | full（权威来自 onWindowState）
+  scene: DEFAULT_SCENE_ID,
+  conn: 'idle',                 // idle | connecting | ready | error
+  connSlow: false,              // 连接超过 3 秒
+  connError: null,              // { code, detail, raw }
+  session: null,                // { sessionId, sceneId, model, lastSeq, costUsd, messageCount, status }
+  turns: [],                    // 全量会话（含所有轮）
+  cur: null,                    // 当前 turn（小窗渲染的就是它）
+  ball: 'idle',                 // idle | thinking | unread | await
+  queueCount: 0,
+  streaming: false,
+  aborted: false,
+  autoRetry: null,
+  fold: { mini: Object.create(null), full: Object.create(null) },  // 思考段折叠状态
+  toolOpen: Object.create(null),
+  // 审批卡：**按 approvalId 索引**（不假设「同时只有一张卡」——多会话/多窗口可并发）。
+  // 用 Map 保序（插入顺序），渲染时按插入顺序排列。cancel 到达即删除。
+  approvals: new Map(),         // approvalId → 归一化后的 ApprovalCard
+  approvalSeq: 0,               // 插入序号（排序兜底，防 createdAt 相同）
+  seq: { perSession: new Map(), seen: 0, dupes: 0, gaps: 0, gapLog: [], lastSeq: 0 },
+  dirtyText: false,
+  dirtyStructure: true,
+  refs: { mini: new Map(), full: new Map() },   // segId → { textNode, len }
+};
+
+let turnCounter = 0;
+let segCounter = 0;
+const segById = new Map();
+
+/* ---- seq 幂等：重复丢弃、跳号容忍并记录 ---- */
+function acceptSeq(sessionId, seq) {
+  if (!sessionId || typeof seq !== 'number' || !Number.isFinite(seq)) return false;
+  let st = store.seq.perSession.get(sessionId);
+  if (!st) { st = { last: 0 }; store.seq.perSession.set(sessionId, st); }
+  if (seq <= st.last) { store.seq.dupes += 1; return false; }
+  if (seq > st.last + 1) {
+    store.seq.gaps += 1;
+    store.seq.gapLog.push(`${sessionId} 期望 ${st.last + 1} 实到 ${seq}`);
+    if (store.seq.gapLog.length > 20) store.seq.gapLog.shift();
+  }
+  st.last = seq;
+  store.seq.lastSeq = seq;
+  store.seq.seen += 1;
+  return true;
+}
+
+/* ==========================================================================
+ * E. 事件规约（Pi 原始事件名，不改名）
+ * ========================================================================== */
+function markStructure() { store.dirtyStructure = true; scheduleFrame(); }
+function markText() { store.dirtyText = true; scheduleFrame(); }
+
+function newSeg(kind) {
+  const s = { id: `sg${++segCounter}`, kind, text: '', finalized: false, tool: null };
+  segById.set(s.id, s);
+  return s;
+}
+
+function ensureTurn(sessionId, ts) {
+  const c = store.cur;
+  if (c && c.sessionId === sessionId && c.status === 'streaming') return c;
+  const t = {
+    id: ++turnCounter,
+    sessionId,
+    t0: ts || Date.now(),
+    segments: [],
+    outcomes: [],     // 产出卡片：**跟着轮次走**（不单独存），renderViews 重绘时不丢
+    status: 'streaming',
+    error: null,
+    settledAt: null,
+  };
+  store.turns.push(t);
+  store.cur = t;
+  markStructure();
+  return t;
+}
+
+function lastSeg(turn) { return turn.segments.length ? turn.segments[turn.segments.length - 1] : null; }
+
+function pushSeg(turn, seg) { turn.segments.push(seg); markStructure(); return seg; }
+
+/** 取/建一个「未收尾」的同类段；顺手把它前面还开着的段收尾（思考 → 文本 → 工具 的自然分段）。 */
+function ensureOpenSeg(turn, kind) {
+  const l = lastSeg(turn);
+  if (l && l.kind === kind && !l.finalized) return l;
+  if (l && !l.finalized) l.finalized = true;
+  for (let i = turn.segments.length - 2; i >= 0; i -= 1) {
+    const s = turn.segments[i];
+    if (s.finalized) break;
+    s.finalized = true;
+  }
+  return pushSeg(turn, newSeg(kind));
+}
+
+function closeOpenSegs(turn) {
+  for (let i = turn.segments.length - 1; i >= 0; i -= 1) {
+    const s = turn.segments[i];
+    if (s.finalized) break;
+    s.finalized = true;
+  }
+}
+
+function setStreaming(v) {
+  if (store.streaming === v) return;
+  store.streaming = v;
+  markStructure();
+}
+
+function setBall(v) {
+  if (store.ball === v) return;
+  store.ball = v;
+  renderBall();   // 球态是「即刻反馈」，不走 rAF
+}
+
+function ensureTurnOf(sessionId, ts) {
+  return ensureTurn(sessionId || (store.session && store.session.sessionId) || 's_unknown', ts);
+}
+
+function applyEvent(ev, sessionId, ts) {
+  const type = ev && typeof ev === 'object' ? ev.type : undefined;
+  switch (type) {
+    /* ---------- 轮的生命周期 ---------- */
+    case 'agent_start':
+      ensureTurnOf(sessionId, ts);
+      store.aborted = false;
+      setStreaming(true);
+      setBall('thinking');
+      markStructure();
+      break;
+    case 'turn_start':
+      ensureTurnOf(sessionId, ts);
+      setStreaming(true);
+      markStructure();
+      break;
+    case 'agent_end':
+      if (ev && ev.willRetry === true) {
+        store.autoRetry = '模型调用失败，正在自动重试…';
+      }
+      setStreaming(false);
+      markStructure();
+      break;
+    case 'agent_settled':
+      settleTurn();
+      break;
+
+    /* ---------- 消息 ---------- */
+    case 'message_start': {
+      const role = ev.messageRole || (ev.message && ev.message.role) || '';
+      const t = ensureTurnOf(sessionId, ts);
+      if (role === 'user') {
+        const txt = messageText(ev.message);
+        const prevUser = [...t.segments].reverse().find((s) => s.kind === 'user');
+        // 乐观插入过同一条就跳过（避免「发送时插一次 + 事件再来一次」的双份气泡）
+        if (!prevUser || (txt && prevUser.text !== txt)) pushSeg(t, Object.assign(newSeg('user'), { text: txt, finalized: true }));
+      }
+      markStructure();
+      break;
+    }
+    case 'message_end': {
+      const role = ev.messageRole || (ev.message && ev.message.role) || '';
+      const t = store.cur;
+      if (t && role === 'assistant') {
+        const txt = (ev.message && Array.isArray(ev.message.content)) ? ev.message.content : null;
+        closeOpenSegs(t);
+        void txt;
+      }
+      markStructure();
+      break;
+    }
+    case 'message_update': {
+      const sub = assistantSub(ev);
+      if (!sub) break;
+      const t = ensureTurnOf(sessionId, ts);
+      switch (sub.type) {
+        case 'thinking_start':
+          ensureOpenSeg(t, 'think');
+          markStructure();
+          break;
+        case 'thinking_delta': {
+          const s = ensureOpenSeg(t, 'think');
+          s.text += sub.delta;
+          markText();
+          break;
+        }
+        case 'thinking_end': {
+          const s = lastSeg(t);
+          if (s && s.kind === 'think') s.finalized = true;
+          markStructure();
+          break;
+        }
+        case 'text_start':
+          ensureOpenSeg(t, 'text');
+          markStructure();
+          break;
+        case 'text_delta': {
+          const s = ensureOpenSeg(t, 'text');
+          s.text += sub.delta;
+          markText();
+          break;
+        }
+        case 'text_end': {
+          const s = lastSeg(t);
+          if (s && s.kind === 'text') s.finalized = true;
+          markStructure();
+          break;
+        }
+        default:
+          break;  // toolcall_* 等：以 tool_execution_* 为准，不猜字段
+      }
+      break;
+    }
+
+    /* ---------- 工具 ---------- */
+    case 'tool_execution_start': {
+      const t = ensureTurnOf(sessionId, ts);
+      closeOpenSegs(t);
+      const s = newSeg('tool');
+      s.tool = {
+        toolCallId: ev.toolCallId || ev.id || null,
+        name: ev.toolName || ev.name || 'tool',
+        args: toolArgsOf(ev),
+        phase: 'running',
+        result: '',
+        ms: null,
+        at: Date.now(),
+      };
+      pushSeg(t, s);
+      markStructure();
+      break;
+    }
+    case 'tool_execution_end': {
+      const t = store.cur;
+      if (!t) break;
+      const id = ev.toolCallId || ev.id || null;
+      let target = null;
+      for (let i = t.segments.length - 1; i >= 0; i -= 1) {
+        const s = t.segments[i];
+        if (s.kind !== 'tool') continue;
+        if (id ? s.tool.toolCallId === id : s.tool.phase === 'running') { target = s; break; }
+      }
+      if (!target) break;
+      target.tool.phase = ev.isError === true ? 'error' : 'ok';
+      const raw = ev.result !== undefined ? ev.result : (ev.error !== undefined ? ev.error : ev.output);
+      target.tool.result = typeof raw === 'string' ? raw : (raw === undefined || raw === null ? '' : JSON.stringify(raw, null, 2));
+      target.tool.ms = typeof ev.durationMs === 'number' ? ev.durationMs : Date.now() - target.tool.at;
+      markStructure();
+      break;
+    }
+
+    /* ---------- 队列 / 重试 / 压缩 ---------- */
+    case 'queue_update':
+      store.queueCount = queuedCount(ev);
+      markStructure();
+      break;
+    case 'auto_retry_start':
+      store.autoRetry = typeof ev.errorMessage === 'string' ? `自动重试中：${ev.errorMessage}` : '自动重试中…';
+      markStructure();
+      break;
+    case 'auto_retry_end':
+      store.autoRetry = null;
+      markStructure();
+      break;
+    case 'compaction_start':
+    case 'compaction_end':
+      markStructure();
+      break;
+
+    /* ---------- 错误 ---------- */
+    case 'error': {
+      const msg = (typeof ev.errorMessage === 'string' && ev.errorMessage)
+        || (typeof ev.message === 'string' && ev.message)
+        || '未知错误';
+      const t = ensureTurnOf(sessionId, ts);
+      closeOpenSegs(t);
+      const s = newSeg('error');
+      s.text = msg;
+      s.finalized = true;
+      t.segments.push(s);
+      t.error = msg;
+      t.status = 'error';
+      setStreaming(false);
+      setBall('idle');
+      markStructure();
+      break;
+    }
+
+    default:
+      break;   // 未知事件：忽略（不改名，也不猜）
+  }
+}
+
+/**
+ * 收到一张产出卡片（`host.onOutcome`）。
+ *
+ * 归属规则（任务书 §1.3）：用 `card.sessionId` 找轮次；
+ *   · 找到 → 挂到那一轮；
+ *    · 找不到 → 挂到**最后一轮**（产出常在一轮结束后才回来）；
+ *    · 再找不到（还没有任何轮次）→ **单独造一轮**来承载它，避免卡片无处安放被丢掉。
+ *
+ * 卡片存进 `turn.outcomes`（**跟着轮次走**，不单独存一张全局表）——
+ * 这样 `renderViews()` 重建 DOM 时卡片会跟着轮次一起重绘，不会丢。
+ *
+ * 幂等：同一 `outcomeId` 重复推送只保留一份（替换旧的那条）。
+ * @param {object} card OutcomeCard
+ */
+function applyOutcomeCard(card) {
+  if (!card || typeof card !== 'object') return;
+  const outcomeId = typeof card.outcomeId === 'string' ? card.outcomeId : null;
+  if (!outcomeId) {
+    console.warn('[minipi:renderer] 收到没有 outcomeId 的产出卡片，已忽略：', card);
+    return;
+  }
+  const normalized = {
+    outcomeId,
+    sessionId: typeof card.sessionId === 'string' ? card.sessionId : null,
+    format: OUTCOME_FORMAT_IDS.includes(card.format) ? card.format : OUTCOME_FORMAT.MD,
+    degraded: card.degraded === true,
+    fileName: typeof card.fileName === 'string' ? card.fileName : `产出-${outcomeId}`,
+    bytes: typeof card.bytes === 'number' ? card.bytes : null,
+    title: typeof card.title === 'string' ? card.title : '',
+    createdAt: typeof card.createdAt === 'number' ? card.createdAt : Date.now(),
+    actions: Array.isArray(card.actions) && card.actions.length ? card.actions.slice() : OUTCOME_ACTIONS.slice(),
+    inlineText: typeof card.inlineText === 'string' ? card.inlineText : null,
+  };
+
+  // 找承载轮次
+  let turn = null;
+  if (normalized.sessionId) turn = store.turns.find((t) => t.sessionId === normalized.sessionId) || null;
+  if (!turn) turn = store.turns.length ? store.turns[store.turns.length - 1] : null;
+  if (!turn) turn = ensureTurn(normalized.sessionId || 's_unknown', Date.now());
+  if (!Array.isArray(turn.outcomes)) turn.outcomes = [];
+
+  const idx = turn.outcomes.findIndex((c) => c.outcomeId === outcomeId);
+  if (idx >= 0) turn.outcomes[idx] = normalized;
+  else turn.outcomes.push(normalized);
+
+  store.cur = turn;
+  setBall('unread');   // 有产出 = 有未读结果，给球一个红点（用户回到 ball 态能看到）
+  markStructure();
+  toast(normalized.degraded ? '产出完成（已降级为 Markdown）' : `产出完成：${normalized.fileName}`, normalized.degraded ? 'warn' : undefined);
+}
+
+/* ==========================================================================
+ * G2. 审批卡（M4.5 / 审批设计 §9.3）
+ *
+ * 数据流：主进程 `EVENTS.APPROVAL`（preload → `host.onApproval`）推 `ApprovalCard`，
+ *   `phase` 三态：
+ *     · "push"   → 新增/覆盖（同 approvalId 重推视为就地更新）
+ *     · "update" → 就地更新（合并了新的 batch 条目）
+ *     · "cancel" → 撤回（超时 / 会话销毁 / alwaysAllow 命中）—— 仅带 id + phase
+ *
+ * 铁律（团队拍板 + 契约）：
+ *   1. **按 `approvalId` 索引**（`store.approvals` 是 Map），不假设「同时只有一张卡」。
+ *   2. 按钮**恒以 `card.actions` 为准**，渲染层不硬编码；`actions` 缺失才退回契约镜像。
+ *   3. 倒计时只用 `expiresAt`/`timeoutMs` **驱动显示**，**不驱动状态转换**：
+ *      到 0 → 置灰 + 显「已超时，已拒绝」+ 禁用三按钮，**保留卡片**，
+ *      等后端 `cancel` 到达才移除（服务端是权威，渲染层不自己判超时）。
+ *   4. `alwaysAllowEligible === true` 才画勾选框，**默认不勾**；勾选**只对 allowOnce 生效**
+ *      （点 deny/terminate 时忽略勾选，不把 remember 发出去）。
+ *   5. diff / 命令一律用服务端给的原文，**渲染层不重算、不读盘**。
+ * ========================================================================== */
+
+/**
+ * 归一化一张审批卡（防御性：字段缺失 / 类型错都不崩）。
+ * `cancel` 只带 id + phase，其余字段按缺省处理。
+ * @param {object} card
+ * @returns {object|null} 归一化后的卡；无法识别返回 null
+ */
+function normalizeApprovalCard(card) {
+  if (!card || typeof card !== 'object') return null;
+  const approvalId = typeof card.approvalId === 'string' ? card.approvalId : null;
+  if (!approvalId) return null;
+  const phase = card.phase === 'update' || card.phase === 'cancel' ? card.phase : 'push';
+  const batch = Array.isArray(card.batch) ? card.batch.filter((b) => b && typeof b === 'object') : [];
+  const createdAt = typeof card.createdAt === 'number' ? card.createdAt : Date.now();
+  const timeoutMs = typeof card.timeoutMs === 'number' && card.timeoutMs > 0 ? card.timeoutMs : APPROVAL_TIMEOUT_MS;
+  const expiresAt = typeof card.expiresAt === 'number' ? card.expiresAt : createdAt + timeoutMs;
+  return {
+    approvalId,
+    sessionId: typeof card.sessionId === 'string' ? card.sessionId : null,
+    phase,
+    kind: typeof card.kind === 'string' ? card.kind : (batch[0] && batch[0].kind) || null,
+    toolName: typeof card.toolName === 'string' ? card.toolName : null,
+    title: typeof card.title === 'string' ? card.title : '',
+    // 按钮：恒以 card.actions 为准；缺失/空 **或 filter 后为空**（全非法值）才退回契约镜像，
+    // 避免「坏数据 → 0 按钮 → 可看不可点的死卡」这种 fail-silent 退化。
+    actions: (() => {
+      const src = Array.isArray(card.actions)
+        ? card.actions.filter((a) => APPROVAL_ACTION_IDS.includes(a))
+        : [];
+      return src.length ? src : APPROVAL_ACTION_IDS.slice();
+    })(),
+    alwaysAllowEligible: card.alwaysAllowEligible === true,
+    createdAt,
+    expiresAt,
+    timeoutMs,
+    batch,
+    // 本地态（非契约字段，渲染层自用）
+    _seq: ++store.approvalSeq,
+  };
+}
+
+/**
+ * 收到一张审批卡（`host.onApproval`）。
+ * push / update → upsert（按 approvalId）；cancel → 移除。
+ * @param {object} raw ApprovalCard
+ */
+function applyApprovalCard(raw) {
+  const card = normalizeApprovalCard(raw);
+  if (!card) {
+    console.warn('[minipi:renderer] 收到无法识别的审批卡，已忽略：', raw);
+    return;
+  }
+  if (card.phase === 'cancel') {
+    const had = store.approvals.delete(card.approvalId);
+    if (had) {
+      // 超时撤卡：给个明确反馈（否则用户会觉得卡「莫名消失」）
+      if (Date.now() >= (had.expiresAt || 0)) toast('审批已超时，按「拒绝」处理', 'warn');
+      markStructure();
+    }
+    return;
+  }
+  const isNew = !store.approvals.has(card.approvalId);
+  store.approvals.set(card.approvalId, card);
+  // 注：重推（push/update）会整体替换卡内容，勾选框随重渲染**回到未勾**——
+  //     这是刻意的**安全默认**（勾选只在「点允许一次」那一刻取值，不跨渲染保留）。
+  setBall('await');
+  markStructure();
+  if (isNew) {
+    const n = card.batch.length || 1;
+    toast(n > 1 ? `有 ${n} 个操作等待你确认` : '有 1 个操作等待你确认', 'warn');
+  }
+}
+
+/**
+ * 审批卡是否已过期（到 0）。**仅用于显示**，不作为移除依据。
+ * @param {object} card
+ * @returns {boolean}
+ */
+function approvalExpired(card) {
+  return typeof card.expiresAt === 'number' && Date.now() >= card.expiresAt;
+}
+
+/** 剩余秒数（不小于 0）。 */
+function approvalRemainSec(card) {
+  if (typeof card.expiresAt !== 'number') return 0;
+  return Math.max(0, Math.ceil((card.expiresAt - Date.now()) / 1000));
+}
+
+/** 把剩余秒数格式化为 `m:ss`（如 4:59）。 */
+function fmtCountdown(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/**
+ * 未决审批摘要（供顶部横幅）：`{ count, cards, tools }`。
+ * `count` = 待确认的**操作条数**（各卡 batch 累加），与卡头「共 N 项」口径一致；
+ * `cards` = 未过期卡数；`tools` = 涉及的 toolName（去重）。
+ * @returns {{ count: number, cards: number, tools: string[] }}
+ */
+function pendingApprovalSummary() {
+  let count = 0;   // 待确认的**操作条数**（batch 累加），与卡头「共 N 项」一致
+  let cards = 0;
+  const tools = new Set();
+  for (const card of store.approvals.values()) {
+    if (approvalExpired(card)) continue;
+    cards += 1;
+    count += Math.max(1, card.batch.length);
+    for (const it of card.batch) if (it.toolName) tools.add(it.toolName);
+  }
+  return { count, cards, tools: [...tools] };
+}
+
+/**
+ * 倒计时 ticking：只为**可见的**倒计时文本节点刷新文案；到 0 时切到「已超时」外观
+ * （加 `.approval--expired`、禁用按钮），**不移除卡片**（等后端 cancel）。
+ * 单独用 1s 定时器，不触发整树重渲染（避免每秒重建 DOM）。
+ */
+function tickApprovals() {
+  if (store.approvals.size === 0) return;
+  const nodes = document.querySelectorAll('[data-approval-timer]');
+  nodes.forEach((node) => {
+    const id = node.getAttribute('data-approval-timer');
+    const card = store.approvals.get(id);
+    if (!card) return;
+    const remain = approvalRemainSec(card);
+    const expired = remain <= 0;
+    node.textContent = expired ? '已超时' : `剩 ${fmtCountdown(remain)}`;
+    const box = node.closest('.approval');
+    if (box) {
+      box.classList.toggle('approval--expired', expired);
+      if (expired) {
+        // 到 0：禁用三按钮（防用户在服务端已决后又点一次 → APPROVAL_NOT_FOUND）
+        box.querySelectorAll('[data-approval-action]').forEach((b) => { b.disabled = true; });
+        const rem = box.querySelector('.approval__remember input');
+        if (rem) { rem.disabled = true; }
+      }
+    }
+  });
+}
+
+/**
+ * [允许一次 / 拒绝 / 中断整轮] → host.approvalDecide({ approvalId, action })。
+ *
+ * ⚠ 勾选框「本会话总是允许」**只对 allowOnce 生效**：点 deny/terminate 时忽略勾选，
+ *   不把 remember 字段发出去（服务端对后两个 action 带 remember 会拒）。
+ * @param {string} approvalId
+ * @param {"allowOnce"|"deny"|"terminate"} action
+ * @param {boolean} remember 用户是否勾了「本会话总是允许」
+ * @param {HTMLElement|null} [boxEl] 被点击按钮所属的 `.approval` 卡片（mini/full 各渲染一份，
+ *   必须用点击祖先定位，绝不可全局 querySelector —— 否则 full 副本点击会把 deciding 加到 mini 副本）
+ */
+function doApprovalDecide(approvalId, action, remember, boxEl) {
+  const card = store.approvals.get(approvalId);
+  if (!card) { toast('这张审批已不存在（可能已超时或已处理）', 'warn'); return; }
+  if (approvalExpired(card)) {
+    toast('审批已超时，按「拒绝」处理', 'warn');
+    return;
+  }
+  if (!APPROVAL_ACTION_IDS.includes(action)) return;
+
+  // 本地立刻给反馈：标记 deciding（防重复点击），但**不**乐观移除卡片 —— 以服务端 cancel 为准
+  const box = boxEl || document.querySelector(`.approval[data-approval-id="${cssEscape(approvalId)}"]`);
+  if (box) {
+    box.classList.add('approval--deciding');
+    box.querySelectorAll('[data-approval-action]').forEach((b) => { b.disabled = true; });
+  }
+  toast(action === 'allowOnce'
+    ? (remember ? '已允许（本会话该工具不再询问）' : '已允许这一次')
+    : action === 'deny' ? '已拒绝' : '已中断整轮');
+
+  const payload = { approvalId, action };
+  if (action === 'allowOnce' && remember && card.alwaysAllowEligible) payload.remember = true;
+
+  Promise.resolve(host.approvalDecide(payload)).catch((err) => {
+    const parsed = parseErrorMessage(err);
+    // APPROVAL_NOT_FOUND：卡已决（超时/已处理），属竞态，给可读提示不崩
+    toast(`提交审批失败：${parsed.detail}`, 'err');
+    // 复位按钮，允许用户重试（若卡还在）
+    if (box && store.approvals.has(approvalId)) {
+      box.classList.remove('approval--deciding');
+      box.querySelectorAll('[data-approval-action]').forEach((b) => { b.disabled = false; });
+    }
+  });
+}
+
+/** CSS.escape 兜底（旧环境无 CSS.escape 时用简单转义）。 */
+function cssEscape(s) {
+  const str = String(s);
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(str);
+  return str.replace(/[^a-zA-Z0-9_-]/g, (m) => `\\${m}`);
+}
+
+/**
+ * 中断后「迟到的一轮结束」护栏。
+ *
+ * 竞态：用户点「中断」→ 本地已把 turn 标成 aborted → 用户立刻又发一条（新 turn 开始流式）
+ * → 上一轮的 `agent_settled` 姗姗来迟 → 若不拦，会把**新一轮**误标成结束。
+ * 因此中断时挂一个闸：接下来第一个 agent_settled 视为「被中断那轮的尾巴」，直接吃掉。
+ * 20s 过期兜底：万一那轮再没发 settle，不至于把后面所有 settle 都吃掉。
+ */
+let abortSettleGate = 0;
+let abortSettleGateAt = 0;
+const ABORT_GATE_TTL_MS = 20000;
+
+function settleTurn() {
+  if (abortSettleGate > 0 && Date.now() - abortSettleGateAt < ABORT_GATE_TTL_MS) {
+    abortSettleGate -= 1;
+    return;
+  }
+  abortSettleGate = 0;
+  const t = store.cur;
+  if (t) {
+    if (t.status === 'streaming') t.status = store.aborted ? 'aborted' : (t.error ? 'error' : 'done');
+    closeOpenSegs(t);
+    t.settledAt = t.settledAt || Date.now();
+  }
+  store.aborted = false;
+  setStreaming(false);
+  store.queueCount = 0;
+  store.autoRetry = null;
+  if (t) setBall(t.status === 'done' ? 'unread' : 'idle');
+  markStructure();
+  refreshSessionState();
+}
+
+/* ==========================================================================
+ * F. 渲染：rAF 驱动 + 定时器兜底
+ * ========================================================================== */
+let rafId = null;
+
+function scheduleFrame() {
+  if (rafId !== null) return;
+  rafId = requestAnimationFrame(frame);
+}
+
+function frame() {
+  rafId = null;
+  try {
+    if (store.dirtyStructure) {
+      store.dirtyStructure = false;
+      store.dirtyText = false;
+      renderViews();
+      renderChrome();
+    } else if (store.dirtyText) {
+      store.dirtyText = false;
+      flushViews();
+    }
+  } catch (err) {
+    console.error('[minipi:renderer] 渲染抛错：', err);
+  }
+}
+
+/** 定时器兜底：rAF 被节流 / 停掉时也继续刷（第二道防线，不依赖事件密度）。 */
+setInterval(() => {
+  if (store.dirtyStructure || store.dirtyText) frame();
+}, 100);
+
+/** 只把新增的文本 append 上去（真·增量，不重建 DOM）。 */
+function flushViews() {
+  for (const which of ['mini', 'full']) {
+    const map = store.refs[which];
+    if (!map || map.size === 0) continue;
+    for (const [segId, ref] of map) {
+      const seg = segById.get(segId);
+      if (!seg || !ref.textNode) continue;
+      if (seg.text.length > ref.len) {
+        ref.textNode.appendData(seg.text.slice(ref.len));
+        ref.len = seg.text.length;
+      }
+    }
+  }
+}
+
+/* ---- 球 ---- */
+function renderBall() {
+  const root = $('#ballRoot');
+  if (!root) return;
+  root.setAttribute('data-ball', store.ball);
+  const caption = { idle: '空闲', thinking: '思考中', unread: '未读', await: '待确认' }[store.ball] || '空闲';
+  $('#ball').setAttribute('aria-label', `minipi 悬浮球，当前状态：${caption}。Enter 打开小窗，右键打开菜单`);
+}
+
+/* ---- 形态（只切 hidden，不碰任何容器内部 DOM） ---- */
+function renderMode() {
+  const m = store.mode;
+  document.body.dataset.mode = m;
+  document.documentElement.dataset.mode = m;
+  $('#ballRoot').hidden = m !== 'ball';
+  $('#miniRoot').hidden = m !== 'mini';
+  $('#fullRoot').hidden = m !== 'full';
+  const chip = $('#mockModeChip');
+  if (chip) chip.textContent = MODE_LABEL[m] || m;
+  if (m !== 'ball') setBall(store.ball === 'unread' ? 'idle' : store.ball);
+}
+
+/* ---- 会话树 / 小窗主体 ---- */
+function buildEmpty() {
+  const sc = SCENE_DEFS[store.scene] || SCENE_DEFS[DEFAULT_SCENE_ID];
+  const box = el('div', 'emptycard');
+  box.appendChild(el('div', 'emptycard__t', '还没有对话'));
+  const p = el('p', 'mini__note');
+  p.innerHTML = '在任意 App 里选中一段文字，按 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd> 抓选区直接提问；'
+    + '或按 <kbd>Alt</kbd>+<kbd>Space</kbd> 唤起小窗后手动输入。';
+  box.appendChild(p);
+  const dl = el('dl', 'emptycard__kv');
+  const rows = [
+    ['场景', sc.label],
+    ['cwd', sc.cwdTemplate],
+    ['工具', sceneToolsLabel(sc.sceneId)],
+    ['会话', sc.sessionManagerMode === 'memory' ? '内存（不落盘）' : '落盘'],
+  ];
+  for (const [k, v] of rows) {
+    dl.appendChild(el('dt', null, k));
+    const dd = el('dd');
+    dd.appendChild(el('code', null, v));
+    dl.appendChild(dd);
+  }
+  box.appendChild(dl);
+  return box;
+}
+
+function buildConnLoading() {
+  const box = el('div', 'loadcard');
+  const pulse = el('div', 'pulse');
+  pulse.setAttribute('aria-hidden', 'true');
+  pulse.appendChild(el('span')); pulse.appendChild(el('span')); pulse.appendChild(el('span'));
+  box.appendChild(pulse);
+  box.appendChild(el('p', 'pulsetext', store.connSlow ? '正在连接 Pi 会话…（已等待超过 3 秒）' : '正在连接 Pi 会话…'));
+  if (store.connSlow) {
+    const hint = el('p', 'mini__note');
+    hint.textContent = '仍在等待主进程建会话。超过 8 秒会自动升级到大窗并露出工具时间线，不会只转圈。';
+    box.appendChild(hint);
+  }
+  return box;
+}
+
+function buildConnError(refsMap) {
+  const e = store.connError || { code: ERROR_CODES.INTERNAL, detail: '未知错误' };
+  const wrap = el('div', 'msg msg--pi');
+  const head = el('div', 'pihead');
+  head.appendChild(el('span', 'piavatar', 'π'));
+  head.appendChild(el('span', null, 'Pi'));
+  wrap.appendChild(head);
+
+  const body = el('div', 'pibody pibody--error');
+  const t = el('p', null, `连接失败：${e.detail}`);
+  t.style.color = '#ff9d96';
+  t.style.fontWeight = '600';
+  body.appendChild(t);
+  body.appendChild(el('div', 'errcode', `错误码：${e.code}`));
+  if (e.raw && e.raw !== `${e.code}: ${e.detail}`) {
+    body.appendChild(el('p', 'mini__note', `原始错误：${clampText(e.raw, 300)}`));
+  }
+  const row = el('div', 'mp__row');
+  row.style.display = 'flex';
+  row.style.gap = '6px';
+  row.style.marginTop = '8px';
+  row.style.flexWrap = 'wrap';
+
+  const retry = el('button', 'btn btn--primary btn--sm', '重试');
+  retry.type = 'button';
+  retry.setAttribute('data-retry-conn', '1');
+  row.appendChild(retry);
+
+  const copy = el('button', 'btn btn--sm', '复制错误详情');
+  copy.type = 'button';
+  copy.setAttribute('data-copy-error', '1');
+  copyRegistry.set(copy, `${e.code}: ${e.detail}\n${e.raw || ''}`.trim());
+  copy.appendChild(el('span', 'sr-only', '（把错误文本复制到剪贴板）'));
+  row.appendChild(copy);
+
+  const ns = el('button', 'btn btn--ghost btn--sm', '另起新会话');
+  ns.type = 'button';
+  ns.setAttribute('data-action', 'newsession');
+  row.appendChild(ns);
+
+  body.appendChild(row);
+  wrap.appendChild(body);
+  void refsMap;
+  return wrap;
+}
+
+function buildTurnNode(turn, view, refsMap) {
+  const wrap = el('div', 'msg msg--pi');
+
+  const head = el('div', 'pihead');
+  head.appendChild(el('span', 'piavatar', 'π'));
+  head.appendChild(el('span', null, 'Pi'));
+  const chip = el('span', `chip chip--${turn.sessionId && store.session && turn.sessionId === store.session.sessionId ? store.scene : DEFAULT_SCENE_ID}`, store.scene);
+  chip.style.marginLeft = '4px';
+  head.appendChild(chip);
+  if (turn.status === 'aborted') head.appendChild(el('span', 'chip chip--warn', '已中断'));
+  if (turn.status === 'error') head.appendChild(el('span', 'chip chip--danger', '失败'));
+  wrap.appendChild(head);
+
+  const body = el('div', 'pibody' + (view === 'full' ? ' pibody--wide' : ''));
+
+  const content = turn.segments.filter((s) => s.kind !== 'user');
+  if (turn.status === 'streaming' && content.length === 0) {
+    const pulse = el('div', 'pulse');
+    pulse.setAttribute('aria-hidden', 'true');
+    pulse.appendChild(el('span')); pulse.appendChild(el('span')); pulse.appendChild(el('span'));
+    body.appendChild(pulse);
+    const pt = el('p', 'pulsetext', 'Pi 正在思考…');
+    body.appendChild(pt);
+    if (view === 'mini' && store.queueCount > 0) {
+      body.appendChild(el('p', 'mini__note', `已排队 ${store.queueCount} 条，Pi 做完当前动作后会接上。`));
+    }
+  }
+
+  let lastTextP = null;
+  for (const seg of turn.segments) {
+    if (seg.kind === 'think') body.appendChild(buildThink(seg, view, refsMap));
+    else if (seg.kind === 'text') { lastTextP = buildText(seg, refsMap); body.appendChild(lastTextP); }
+    else if (seg.kind === 'tool') body.appendChild(view === 'full' ? buildToolCard(seg) : buildToolLine(seg));
+    else if (seg.kind === 'error') body.appendChild(buildErrorSeg(seg, refsMap));
+    else if (seg.kind === 'note') body.appendChild(el('p', 'mini__note', seg.text));
+  }
+
+  /* 产出卡片：紧跟这一轮的内容之后（和工具卡同一层，贴着对话流） */
+  if (Array.isArray(turn.outcomes) && turn.outcomes.length) {
+    for (const oc of turn.outcomes) body.appendChild(buildOutcomeCard(oc, view === 'full'));
+  }
+
+  /* 闪烁光标：跟在正在流式的那一段后面。放在 <p> 内部，
+     这样增量 append 的文本天然排在光标之前（不用重建 DOM）。 */
+  if (turn.status === 'streaming') {
+    const lastTextSeg = [...turn.segments].reverse().find((s) => s.kind === 'text' && !s.finalized);
+    const caret = el('span', 'caret');
+    caret.setAttribute('aria-hidden', 'true');
+    if (lastTextSeg && lastTextP) lastTextP.appendChild(caret);
+    else body.appendChild(caret);
+  }
+
+  if (turn.status === 'error' && turn.error) {
+    const row = el('div', 'mp__row');
+    row.style.display = 'flex';
+    row.style.gap = '6px';
+    row.style.marginTop = '8px';
+    row.style.flexWrap = 'wrap';
+    const retry = el('button', 'btn btn--primary btn--sm', '重试');
+    retry.type = 'button';
+    retry.setAttribute('data-retry-turn', '1');
+    row.appendChild(retry);
+    const copy = el('button', 'btn btn--sm', '复制错误详情');
+    copy.type = 'button';
+    copy.setAttribute('data-copy-error', '1');
+    copyRegistry.set(copy, turn.error);
+    row.appendChild(copy);
+    body.appendChild(row);
+  }
+
+  if (turn.settledAt && turn.status !== 'streaming' && view === 'full') {
+    body.appendChild(el('p', 'mini__note', `本轮耗时 ${fmtMs(turn.settledAt - turn.t0)}`));
+  }
+
+  wrap.appendChild(body);
+  return wrap;
+}
+
+function buildThink(seg, view, refsMap) {
+  const openMap = store.fold[view];
+  // 折叠状态存在 store 里（重渲染不丢）；默认值按视图不同：
+  // 小窗默认收起、大窗默认展开 —— 用户点过之后以 store 里的显式值为准。
+  const explicit = openMap[seg.id];
+  const open = explicit === undefined ? view === 'full' : explicit === true;
+  const box = el('div', 'thinkbox');
+  const head = el('button', 'thinkbox__head');
+  head.type = 'button';
+  head.setAttribute('data-think', seg.id);
+  head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  head.appendChild(el('span', null, open ? '▾' : '▸'));
+  head.appendChild(el('span', 'thinkbox__title', '思考'));
+  head.appendChild(el('span', 'chip', `${seg.text.length} 字`));
+  box.appendChild(head);
+  if (open) {
+    const body = el('div', 'thinkbox__body');
+    const span = el('span');
+    const tn = document.createTextNode(seg.text);
+    span.appendChild(tn);
+    body.appendChild(span);
+    box.appendChild(body);
+    refsMap.set(seg.id, { textNode: tn, len: seg.text.length });
+  }
+  return box;
+}
+
+function buildText(seg, refsMap) {
+  if (seg.finalized) {
+    const holder = el('div');
+    holder.appendChild(renderMarkdown(seg.text));
+    refsMap.set(seg.id, { textNode: null, len: seg.text.length });
+    return holder;
+  }
+  const p = el('p');
+  const span = el('span');
+  const tn = document.createTextNode(seg.text);
+  span.appendChild(tn);
+  p.appendChild(span);
+  refsMap.set(seg.id, { textNode: tn, len: seg.text.length });
+  return p;
+}
+
+function buildErrorSeg(seg, refsMap) {
+  const p = el('p');
+  p.style.color = '#ff9d96';
+  p.style.fontWeight = '600';
+  p.style.wordBreak = 'break-word';
+  p.textContent = seg.text;
+  refsMap.set(seg.id, { textNode: null, len: seg.text.length });
+  return p;
+}
+
+/** 工具参数的「一行摘要」：优先路径类字段 —— 用单行省略展示。 */
+function toolSummary(tool) {
+  const a = tool.args;
+  if (a && typeof a === 'object') {
+    const v = a.path || a.file || a.file_path || a.pattern || a.command || a.query || a.url;
+    if (typeof v === 'string' && v) return v;
+    if (typeof a.glob === 'string' && a.glob) return a.glob;
+  }
+  return '';
+}
+
+function toolStatusText(tool) {
+  if (tool.phase === 'running') return '执行中…';
+  if (tool.phase === 'error') return `失败 · ${fmtMs(tool.ms)}`;
+  return `完成 · ${fmtMs(tool.ms)}`;
+}
+
+function buildToolLine(seg) {
+  const tool = seg.tool;
+  const wrap = el('div');
+  const btn = el('button', 'tooline');
+  btn.type = 'button';
+  btn.setAttribute('data-tool', seg.id);
+  btn.setAttribute('aria-expanded', store.toolOpen[seg.id] === true ? 'true' : 'false');
+  const gear = el('span', 'gear', '⚙');
+  gear.setAttribute('aria-hidden', 'true');
+  btn.appendChild(gear);
+  btn.appendChild(el('code', null, tool.name));
+  const path = el('span', 'tooline__path', toolSummary(tool) || '(无参数)');
+  btn.appendChild(path);
+  const st = el('span', 'toolcard__st', toolStatusText(tool));
+  st.classList.add(tool.phase === 'running' ? 'st--running' : (tool.phase === 'error' ? 'st--err' : 'st--ok'));
+  btn.appendChild(st);
+  btn.appendChild(el('span', 'tooline__chev', store.toolOpen[seg.id] ? '收起 ▴' : '详情 ▾'));
+  wrap.appendChild(btn);
+  if (store.toolOpen[seg.id]) wrap.appendChild(buildToolBody(seg, 'toolDetail'));
+  return wrap;
+}
+
+/** 工具参数与结果的正文（`cls` 决定装进小窗的 `.toolDetail` 还是大窗的 `.toolcard__body`）。 */
+function buildToolBody(seg, cls) {
+  const tool = seg.tool;
+  const box = el('div', cls);
+  const pre1 = el('pre');
+  pre1.textContent = `参数：${clampText(JSON.stringify(tool.args ?? null, null, 2), 4000)}`;
+  box.appendChild(pre1);
+  const pre2 = el('pre');
+  pre2.textContent = `cwd：${(SCENE_DEFS[store.scene] || SCENE_DEFS[DEFAULT_SCENE_ID]).cwdTemplate}`;
+  box.appendChild(pre2);
+  const pre3 = el('pre');
+  pre3.textContent = tool.result
+    ? `结果：${clampText(tool.result, 4000)}`
+    : `状态：${toolStatusText(tool)}`;
+  box.appendChild(pre3);
+  return box;
+}
+
+function buildToolCard(seg) {
+  const tool = seg.tool;
+  const card = el('div', 'toolcard');
+  const head = el('div', 'toolcard__head');
+  head.appendChild(el('span', 'chip chip--tool', tool.name));
+  head.appendChild(el('span', 'toolcard__path', toolSummary(tool) || '(无参数)'));
+  const st = el('span', 'toolcard__st', toolStatusText(tool));
+  st.classList.add(tool.phase === 'running' ? 'st--running' : (tool.phase === 'error' ? 'st--err' : 'st--ok'));
+  head.appendChild(st);
+  card.appendChild(head);
+  card.appendChild(buildToolBody(seg, 'toolcard__body'));
+  return card;
+}
+
+/* ==========================================================================
+ * 产出卡片渲染（方案 §3.4 / impl-plan T1.3）
+ * ========================================================================== */
+
+/** 文件名的中间截断长度：360 小窗（扣掉内边距与 chip）大约能放 22 个等宽字符。 */
+const OUTCOME_NAME_MAX_CHARS = 22;
+
+/**
+ * 一张产出卡片。
+ * 结构（自上而下）：
+ *   ① 格式 chip（docx / md）+ 降级 chip（仅 degraded 时）
+ *   ② 文件名（中间截断 + 单行省略双保险，`title` 给全名）
+ *   ③ 元信息：大小 · 时间
+ *   ④ 按钮行：正常 = [打开][另存为][再改改]；落盘失败（有 inlineText）= [复制内容][再改改]
+ *
+ * ⚠ 关键约束：
+ *   · `title`（产出标题）**只进 title 属性 / aria-label**，界面上不重复显示 —— 文件名已经带它；
+ *   · 有 `inlineText`（降级③：落盘失败）时，**打开 / 另存为** 换成 **复制内容**，
+ *     绝不出现「点了没反应」的按钮（方案 §3.3）。
+ * @param {object} card 归一化后的 OutcomeCard
+ * @param {boolean} wide 大窗（true）还是小窗（false）—— 只影响文件名可放的长度
+ * @returns {HTMLElement}
+ */
+function buildOutcomeCard(card, wide) {
+  const wrap = el('div', 'outcome' + (card.degraded ? ' outcome--degraded' : ''));
+  // 无障碍：整卡是可交互区域（含按钮），给个 role 与标签
+  wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', `产出：${card.title || card.fileName}`);
+
+  const fmtLabel = card.format === OUTCOME_FORMAT.DOCX ? 'docx' : 'md';
+  const broken = card.inlineText !== null && card.inlineText !== undefined;
+
+  /* ① 顶行：格式 chip + 降级 chip + 「产出」小标 */
+  const top = el('div', 'outcome__top');
+  top.appendChild(el('span', 'outcome__title', broken ? '产出（未落盘）' : '产出'));
+  const fmtChip = el('span', `chip chip--${fmtLabel}`, fmtLabel);
+  fmtChip.setAttribute('title', fmtLabel === 'docx' ? 'Word 文档（.docx）' : 'Markdown（.md）');
+  top.appendChild(fmtChip);
+  if (card.degraded) {
+    const dc = el('span', 'chip chip--warn', '已降级为 Markdown');
+    dc.setAttribute('title', '原定 docx，已降级为 Markdown —— 内容完整，格式从简。');
+    top.appendChild(dc);
+  }
+  wrap.appendChild(top);
+
+  /* ② 文件名：中间截断（保留扩展名）+ CSS 单行省略兜底 */
+  const maxChars = wide ? OUTCOME_TITLE_MAX_CHARS : OUTCOME_NAME_MAX_CHARS;
+  const nameEl = el('div', 'outcome__name', middleTruncate(card.fileName, maxChars));
+  nameEl.setAttribute('title', `${card.fileName}${card.title ? `（${card.title}）` : ''}`);
+  wrap.appendChild(nameEl);
+
+  /* ③ 元信息：大小 · 时间 */
+  const metaEl = el('div', 'outcome__meta', `${formatBytes(card.bytes)} · ${formatClock(card.createdAt)}`);
+  metaEl.setAttribute('title', `${formatBytes(card.bytes)} · ${new Date(card.createdAt).toLocaleString()}`);
+  wrap.appendChild(metaEl);
+
+  /* ④ 按钮行 */
+  const acts = el('div', 'outcome__acts');
+  const hasAction = (a) => card.actions.includes(a);
+
+  if (broken) {
+    // 降级③：落盘失败 —— 打开 / 另存为 无从谈起，改为「复制内容」
+    const copyBtn = el('button', 'btn btn--sm btn--primary', '复制内容');
+    copyBtn.type = 'button';
+    copyBtn.setAttribute('data-outcome-copy', card.outcomeId);
+    copyBtn.setAttribute('title', '落盘失败，内容已在卡片内；点此复制到剪贴板');
+    acts.appendChild(copyBtn);
+    const note = el('span', 'outcome__note', '未能写入 outbox');
+    note.style.flex = '1';
+    note.style.minWidth = '0';
+    acts.appendChild(note);
+  } else {
+    if (hasAction('open')) {
+      const b = el('button', 'btn btn--sm btn--primary', '打开');
+      b.type = 'button';
+      b.setAttribute('data-outcome-open', card.outcomeId);
+      b.setAttribute('title', `用系统默认程序打开 ${card.fileName}`);
+      acts.appendChild(b);
+    }
+    if (hasAction('saveAs')) {
+      const b = el('button', 'btn btn--sm', '另存为');
+      b.type = 'button';
+      b.setAttribute('data-outcome-saveas', card.outcomeId);
+      b.setAttribute('title', '另存到其他位置（弹系统保存框）');
+      acts.appendChild(b);
+    }
+  }
+  if (hasAction('revise')) {
+    const b = el('button', 'btn btn--sm btn--ghost', '再改改');
+    b.type = 'button';
+    b.setAttribute('data-outcome-revise', card.outcomeId);
+    b.setAttribute('title', '基于这份产出继续让 Pi 修改');
+    acts.appendChild(b);
+  }
+  wrap.appendChild(acts);
+
+  return wrap;
+}
+
+/* ==========================================================================
+ * G3. 审批卡 DOM（三类模板；M4.5 / 审批设计 §9.3）
+ * ========================================================================== */
+
+/**
+ * 把服务端给的 unified diff 文本按行着色（新增绿 / 删除红 / hunk 紫 / 上下文灰）。
+ * **不重算 diff**，只对既有文本做展示着色。
+ * @param {string} diff
+ * @returns {DocumentFragment}
+ */
+function buildDiffBody(diff) {
+  const frag = document.createDocumentFragment();
+  const lines = String(diff ?? '').split('\n');
+  for (const line of lines) {
+    let cls = 'd-ctx';
+    if (line.startsWith('@@')) cls = 'd-hunk';
+    else if (line.startsWith('+')) cls = 'd-add';
+    else if (line.startsWith('-')) cls = 'd-del';
+    const span = el('span', cls);
+    span.appendChild(document.createTextNode(line + '\n'));
+    frag.appendChild(span);
+  }
+  return frag;
+}
+
+/**
+ * 渲染一条 `ApprovalBatchItem`（三类模板）。
+ * @param {object} item ApprovalBatchItem
+ * @returns {HTMLElement}
+ */
+function buildApprovalItem(item) {
+  const box = el('div', 'approval__item');
+  const kind = item.kind;
+  const label = APPROVAL_KIND_LABEL[kind] || item.title || item.toolName || '操作';
+
+  /* 头行：类别标题 + 工具名 chip */
+  const head = el('div', 'approval__itemhead');
+  head.appendChild(el('span', 'approval__itemtitle', item.title || label));
+  if (item.toolName) {
+    const tc = el('span', 'chip chip--tool', item.toolName);
+    head.appendChild(tc);
+  }
+  box.appendChild(head);
+
+  if (kind === 'write') {
+    /* ---- write：路径 + 字节 + 预览 + 覆盖警示 ---- */
+    if (item.path) {
+      const p = el('div', 'approval__path');
+      p.textContent = String(item.path);
+      p.setAttribute('title', String(item.path));
+      box.appendChild(p);
+    }
+    const bits = [];
+    if (typeof item.bytes === 'number') bits.push(formatBytes(item.bytes));
+    if (item.overwrite === true) bits.push('目标已存在');
+    if (bits.length) box.appendChild(el('div', 'approval__sub', bits.join(' · ')));
+    if (item.overwrite === true) {
+      box.appendChild(el('div', 'approval__warn', '目标文件已存在，写入将覆盖原内容。'));
+    }
+    if (typeof item.preview === 'string' && item.preview) {
+      const pre = el('pre', 'approval__code');
+      pre.appendChild(document.createTextNode(item.preview));
+      box.appendChild(pre);
+    }
+  } else if (kind === 'edit') {
+    /* ---- edit：路径 + 真实 diff（着色）+ 统计 ---- */
+    if (item.path) {
+      const p = el('div', 'approval__path');
+      p.textContent = String(item.path);
+      p.setAttribute('title', String(item.path));
+      box.appendChild(p);
+    }
+    const statRow = el('div', 'approval__itemhead');
+    if (item.diffStat && (typeof item.diffStat.added === 'number' || typeof item.diffStat.removed === 'number')) {
+      const stat = el('span', 'approval__stat');
+      const add = el('span', 's-add', `+${item.diffStat.added || 0}`);
+      const del = el('span', 's-del', ` -${item.diffStat.removed || 0}`);
+      stat.appendChild(add); stat.appendChild(del);
+      statRow.appendChild(stat);
+    }
+    if (item.tooLargeToDiff === true) {
+      statRow.appendChild(el('span', 'chip chip--warn', '改动较大，仅显示统计'));
+    }
+    if (statRow.childNodes.length) box.appendChild(statRow);
+    if (item.tooLargeToDiff !== true && typeof item.diff === 'string' && item.diff) {
+      const pre = el('pre', 'approval__code approval__diff');
+      pre.appendChild(buildDiffBody(item.diff));
+      box.appendChild(pre);
+    }
+  } else if (kind === 'command') {
+    /* ---- command：全命令（原样，不脱敏）+ shell + timeout + 高危红标 ---- */
+    const meta = el('div', 'approval__sub');
+    const parts = [];
+    if (item.shell) parts.push(item.shell);
+    if (typeof item.timeoutSec === 'number') parts.push(`超时 ${item.timeoutSec}s`);
+    meta.textContent = parts.join(' · ');
+    if (parts.length) box.appendChild(meta);
+    if (item.risk === 'high') {
+      box.appendChild(el('div', 'approval__warn', '命令命中高危模式，请确认后再生效。'));
+    }
+    const pre = el('pre', 'approval__code' + (item.risk === 'high' ? ' approval__code--risk' : ''));
+    // 命令必须**原样全文**显示（用户判断的唯一依据）；用 textContent 防注入
+    pre.appendChild(document.createTextNode(typeof item.command === 'string' ? item.command : ''));
+    box.appendChild(pre);
+  } else {
+    /* ---- 未知 kind：兜底显示（不猜字段） ---- */
+    box.appendChild(el('div', 'approval__sub', '未知操作类型，请谨慎确认。'));
+  }
+
+  return box;
+}
+
+/**
+ * 构建一张审批卡。
+ *
+ * 三按钮文案由 `APPROVAL_ACTION_LABEL` 映射，**按钮集以 `card.actions` 为准**。
+ * 过期卡（到 0 但 cancel 未到）：整体置灰 + 禁用按钮 + 倒计时显「已超时」。
+ *
+ * @param {object} card 归一化后的审批卡
+ * @returns {HTMLElement}
+ */
+function buildApprovalCard(card) {
+  const expired = approvalExpired(card);
+  const wrap = el('div', 'approval' + (expired ? ' approval--expired' : ''));
+  wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', `审批：${card.title || APPROVAL_KIND_LABEL[card.kind] || '操作'}`);
+  wrap.setAttribute('data-approval-id', card.approvalId);
+
+  const n = card.batch.length;
+  /* ① 顶行：标题 + 条数 + 倒计时 */
+  const top = el('div', 'approval__top');
+  top.appendChild(el('span', 'approval__title', card.title || APPROVAL_KIND_LABEL[card.kind] || '需要确认'));
+  if (n > 1) top.appendChild(el('span', 'approval__count', `共 ${n} 项`));
+  const timer = el('span', 'approval__timer');
+  timer.setAttribute('data-approval-timer', card.approvalId);
+  timer.setAttribute('role', 'timer');
+  timer.setAttribute('aria-live', 'off');
+  timer.textContent = expired ? '已超时' : `剩 ${fmtCountdown(approvalRemainSec(card))}`;
+  timer.setAttribute('title', `审批等待上限 ${Math.round(card.timeoutMs / 1000)} 秒；到点按「拒绝」处理`);
+  top.appendChild(timer);
+  wrap.appendChild(top);
+
+  /* ② 批量条目 */
+  const batchBox = el('div', 'approval__batch');
+  if (n === 0) {
+    // cancel 之外理论上不会空；空就提示，不画空壳
+    batchBox.appendChild(el('div', 'approval__sub', '（无待确认内容）'));
+  } else {
+    for (const item of card.batch) batchBox.appendChild(buildApprovalItem(item));
+  }
+  wrap.appendChild(batchBox);
+
+  /* ③ 「本会话总是允许」勾选框：仅 alwaysAllowEligible 时出现，默认不勾，只对「允许一次」生效 */
+  if (card.alwaysAllowEligible && !expired) {
+    const lab = el('label', 'approval__remember');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = false;                        // 默认不勾（安全红线）
+    cb.setAttribute('data-approval-remember', card.approvalId);
+    lab.appendChild(cb);
+    lab.appendChild(el('span', null, `本会话总是允许「${card.toolName || card.kind || '该工具'}」（仅对「允许一次」生效）`));
+    wrap.appendChild(lab);
+  }
+
+  /* ④ 三按钮（顺序 = card.actions 顺序；文案 = 中文术语） */
+  const acts = el('div', 'approval__acts');
+  for (const action of card.actions) {
+    const label = APPROVAL_ACTION_LABEL[action] || action;
+    const cls = action === 'allowOnce'
+      ? 'btn btn--sm btn--primary'
+      : action === 'deny' ? 'btn btn--sm btn--warn' : 'btn btn--sm btn--danger';
+    const b = el('button', cls, label);
+    b.type = 'button';
+    b.setAttribute('data-approval-action', action);
+    b.setAttribute('data-approval-target', card.approvalId);
+    if (action === 'terminate') b.setAttribute('title', '拒绝并停止这一整轮 agent 运行');
+    else if (action === 'deny') b.setAttribute('title', '拒绝这一次，模型不重试该操作，轮次继续');
+    else b.setAttribute('title', '放行这一次（不改参）；下次同工具还会再问');
+    if (expired) b.disabled = true;
+    acts.appendChild(b);
+  }
+  if (expired) acts.appendChild(el('span', 'approval__note', '已超时，已拒绝'));
+  wrap.appendChild(acts);
+
+  return wrap;
+}
+
+/**
+ * 把所有审批卡渲染进某个视图容器末尾（按插入顺序）。
+ * 审批卡**不挂在轮次上**（它随来随走、由 cancel 撤回），单独一段追加在对话流之后。
+ * @param {HTMLElement} root
+ */
+function appendApprovalCards(root) {
+  if (store.approvals.size === 0) return;
+  const cards = [...store.approvals.values()].sort((a, b) => a._seq - b._seq);
+  for (const card of cards) root.appendChild(buildApprovalCard(card));
+}
+
+/* ---- 两个视图的重建（只在结构变化时发生；形态切换不触发） ---- */
+function renderViews() {
+  const miniBody = $('#miniBody');
+  const fullTree = $('#fullTree');
+
+  /* --- 小窗：只渲染「当前这一轮」 --- */
+  const nearMini = miniBody.scrollHeight - miniBody.scrollTop - miniBody.clientHeight < 80;
+  const miniRefs = new Map();
+  miniBody.textContent = '';
+  if (store.conn === 'error') {
+    miniBody.appendChild(buildConnError(miniRefs));
+  } else if (store.conn === 'connecting' && store.turns.length === 0) {
+    miniBody.appendChild(buildConnLoading());
+  } else if (store.turns.length === 0) {
+    miniBody.appendChild(buildEmpty());
+  } else {
+    const turn = store.turns[store.turns.length - 1];
+    for (const seg of turn.segments) {
+      if (seg.kind === 'user') {
+        const m = el('div', 'msg msg--user');
+        m.appendChild(el('div', 'bubble', seg.text));
+        miniBody.appendChild(m);
+      }
+    }
+    miniBody.appendChild(buildTurnNode(turn, 'mini', miniRefs));
+    if (store.autoRetry) miniBody.appendChild(el('p', 'mini__note', store.autoRetry));
+  }
+  // 审批卡：不挂在轮次上，追加在对话流之后（即便还没有任何轮次也要能显示）
+  appendApprovalCards(miniBody);
+  store.refs.mini = miniRefs;
+  if (nearMini) miniBody.scrollTop = miniBody.scrollHeight;
+
+  /* --- 大窗：全量会话树 --- */
+  const nearFull = fullTree.scrollHeight - fullTree.scrollTop - fullTree.clientHeight < 80;
+  const fullRefs = new Map();
+  fullTree.textContent = '';
+  if (store.conn === 'error') {
+    fullTree.appendChild(buildConnError(fullRefs));
+  } else if (store.conn === 'connecting' && store.turns.length === 0) {
+    fullTree.appendChild(buildConnLoading());
+  } else if (store.turns.length === 0) {
+    fullTree.appendChild(buildEmpty());
+  } else {
+    store.turns.forEach((turn, idx) => {
+      if (idx > 0) fullTree.appendChild(el('div', 'turndivider', `第 ${idx + 1} 轮`));
+      for (const seg of turn.segments) {
+        if (seg.kind === 'user') {
+          const m = el('div', 'msg msg--user');
+          m.appendChild(el('div', 'bubble', seg.text));
+          fullTree.appendChild(m);
+        }
+      }
+      fullTree.appendChild(buildTurnNode(turn, 'full', fullRefs));
+      void idx;
+    });
+    if (store.autoRetry) fullTree.appendChild(el('p', 'mini__note', store.autoRetry));
+  }
+  // 审批卡：追加在全量会话树之后
+  appendApprovalCards(fullTree);
+  store.refs.full = fullRefs;
+  if (nearFull) fullTree.scrollTop = fullTree.scrollHeight;
+}
+
+/* ---- 卡片周边（head / foot / 侧栏） ---- */
+function renderChrome() {
+  const sc = SCENE_DEFS[store.scene] || SCENE_DEFS[DEFAULT_SCENE_ID];
+  const sid = store.session ? store.session.sessionId : null;
+
+  const chip = $('#miniSceneChip');
+  chip.textContent = sc.label;
+  chip.className = `chip chip--${sc.sceneId} mini__sceneChip`;
+
+  const sessChip = $('#sessSceneChip');
+  sessChip.textContent = sc.label;
+  sessChip.className = `chip chip--${sc.sceneId}`;
+  $('#sessTitle').textContent = store.turns.length ? (firstUserText() || '当前会话') : '（还没有对话）';
+  $('#sessMeta').textContent = `${store.turns.length} 轮 · ${store.seq.lastSeq} 事件`;
+  $('#sessCurrent').setAttribute('aria-pressed', 'true');
+
+  $('#fullSub').textContent = sid
+    ? `会话 ${sid} · ${sc.label} · ${fmtMsgCount()} · lastSeq ${store.seq.lastSeq} · 三态共用同一份事件日志`
+    : '未连接会话';
+
+  $('#fullModel').textContent = store.session && store.session.model ? store.session.model : '—';
+  $('#sceneNote').textContent = `${sc.description} cwd ${sc.cwdTemplate} · 工具 ${sceneToolsLabel(sc.sceneId)}`;
+
+  document.querySelectorAll('[data-scene]').forEach((b) => {
+    b.setAttribute('aria-pressed', String(b.getAttribute('data-scene') === store.scene));
+  });
+
+  $('#costSession').textContent = sid || '—';
+  $('#costMsgs').textContent = store.session && typeof store.session.messageCount === 'number' ? String(store.session.messageCount) : '—';
+  $('#costSeq').textContent = String(store.seq.lastSeq);
+  $('#costUsd').textContent = fmtUsd(store.session && store.session.costUsd);
+  $('#seqSeen').textContent = String(store.seq.seen);
+  $('#seqDupes').textContent = String(store.seq.dupes);
+  $('#seqGaps').textContent = String(store.seq.gaps);
+
+  const q = $('#queueChip');
+  if (store.queueCount > 0) { q.hidden = false; q.textContent = `排队 ${store.queueCount} 条`; }
+  else { q.hidden = true; q.textContent = ''; }
+
+  $('#btnAbort').disabled = !store.streaming || !store.session;
+
+  /* 审批横幅：有未决审批时显示，文案带条数 */
+  const banner = $('#miniBanner');
+  const bannerText = $('#bannerText');
+  const pending = pendingApprovalSummary();
+  if (banner && bannerText) {
+    if (pending && pending.count > 0) {
+      banner.hidden = false;
+      bannerText.textContent = `⚠ 等待你确认 ${pending.count} 个操作`;
+      bannerText.setAttribute('title', `${pending.count} 项待确认：${pending.tools.join('、') || '操作'}`);
+    } else {
+      banner.hidden = true;
+    }
+  }
+
+  const badge = $('#miniBadge');
+  if (store.mock) {
+    badge.hidden = false;
+    badge.innerHTML = '';
+    const b = el('span');
+    b.innerHTML = '<b>mock 模式（未连接宿主）</b>：没有检测到 <code>window.minipi</code>，'
+      + '当前用假事件流演示 UI。左下的 mock 控制台可切换三态、球子状态、边界态。';
+    badge.appendChild(b);
+  } else {
+    badge.hidden = true;
+    badge.textContent = '';
+  }
+}
+
+function firstUserText() {
+  for (const t of store.turns) {
+    const u = t.segments.find((s) => s.kind === 'user');
+    if (u && u.text) return clampText(u.text, 40);
+  }
+  return '';
+}
+
+function fmtMsgCount() {
+  const n = store.session && typeof store.session.messageCount === 'number' ? store.session.messageCount : null;
+  return n === null ? '消息数未知' : `${n} 条消息`;
+}
+
+/* ==========================================================================
+ * G. 宿主门面：真实 window.minipi / mock
+ * ========================================================================== */
+const realHost = typeof window !== 'undefined' && window.minipi ? window.minipi : null;
+let host = realHost;
+let mockHost = null;
+
+const slowTimer = { id: null };
+let refreshTimer = null;
+
+function setConn(conn, err) {
+  store.conn = conn;
+  store.connError = err || null;
+  if (conn !== 'connecting') store.connSlow = false;
+  markStructure();
+}
+
+async function connectSession(sceneId) {
+  if (store.conn === 'connecting') return;
+  store.connSlow = false;
+  setConn('connecting');
+  if (slowTimer.id) clearTimeout(slowTimer.id);
+  slowTimer.id = setTimeout(() => {
+    slowTimer.id = null;
+    if (store.conn === 'connecting') { store.connSlow = true; markStructure(); }
+  }, 3000);
+  try {
+    const r = await host.createSession({ sceneId });
+    store.session = {
+      sessionId: r.sessionId,
+      sceneId: r.sceneId,
+      model: r.model,
+      lastSeq: r.lastSeq || 0,
+      costUsd: null,
+      messageCount: null,
+      status: 'idle',
+    };
+    store.scene = isSceneId(r.sceneId) ? r.sceneId : sceneId;
+    setConn('ready');
+    refreshSessionState();
+  } catch (err) {
+    const parsed = parseErrorMessage(err);
+    setConn('error', { code: parsed.code, detail: parsed.detail, raw: String((err && err.message) || err) });
+  } finally {
+    if (slowTimer.id) { clearTimeout(slowTimer.id); slowTimer.id = null; }
+  }
+}
+
+async function refreshSessionState() {
+  if (!store.session) return;
+  const sid = store.session.sessionId;
+  try {
+    const s = await host.sessionState({ sessionId: sid });
+    if (!store.session || store.session.sessionId !== sid) return;
+    store.session.model = s.model;
+    store.session.costUsd = s.costUsd;
+    store.session.messageCount = s.messageCount;
+    store.session.status = s.status;
+    if (typeof s.lastSeq === 'number' && s.lastSeq > store.seq.lastSeq) store.seq.lastSeq = s.lastSeq;
+    if (s.sceneId && isSceneId(s.sceneId) && s.sceneId !== store.scene) store.scene = s.sceneId;
+    renderChrome();
+  } catch (err) {
+    // 会话可能已被释放（SESSION_NOT_FOUND）——刷新失败不打断 UI
+    console.warn('[minipi:renderer] sessionState 失败：', String((err && err.message) || err));
+  }
+}
+
+/* ---- 发送 ---- */
+const inputEl = $('#miniInput');
+
+function pushNote(text) {
+  const t = store.cur && store.cur.status === 'streaming' ? store.cur : ensureTurn(store.session ? store.session.sessionId : 's_unknown', Date.now());
+  const s = newSeg('note');
+  s.text = text;
+  s.finalized = true;
+  t.segments.push(s);
+  markStructure();
+}
+
+async function send(text) {
+  const raw = String(text ?? inputEl.value ?? '').trim();
+  if (!raw) { toast('先输入点什么', 'warn'); return; }
+  if (!store.session) {
+    if (store.conn === 'error') { toast('会话没连上，先点「重试」', 'err'); return; }
+    toast('会话还在连接，稍等一下', 'warn');
+    return;
+  }
+  const turn = ensureTurn(store.session.sessionId, Date.now());
+  const u = newSeg('user');
+  u.text = raw;
+  u.finalized = true;
+  turn.segments.push(u);
+  store.aborted = false;
+  setStreaming(true);
+  setBall('thinking');     // 立刻反馈，不等首字
+  markStructure();
+  inputEl.value = '';
+  autoGrowInput();
+
+  try {
+    const r = await host.prompt({ sessionId: store.session.sessionId, text: raw, behavior: 'steer' });
+    if (!r || r.accepted !== true) {
+      toast('这条消息没有被受理（可能上一轮还在收尾）', 'warn');
+    }
+  } catch (err) {
+    const parsed = parseErrorMessage(err);
+    const t = store.cur;
+    if (t) {
+      const s = newSeg('error');
+      s.text = `${parsed.code}: ${parsed.detail}`;
+      s.finalized = true;
+      t.segments.push(s);
+      t.error = s.text;
+      t.status = 'error';
+    }
+    setStreaming(false);
+    setBall('idle');
+    markStructure();
+    toast(`发送失败：${parsed.detail}`, 'err');
+  }
+}
+
+/* ==========================================================================
+ * H. 交互绑定（一次性绑定；重渲染不重新绑定）
+ * ========================================================================== */
+function goState(state) {
+  if (!WINDOW_STATE[state.toUpperCase()]) return;
+  store.mode = state;      // 乐观切换，onWindowState 会再确认一次
+  renderMode();
+  Promise.resolve(host.setWindowState({ state })).catch((err) => {
+    toast(`切换形态失败：${parseErrorMessage(err).detail}`, 'err');
+  });
+}
+
+function openMenu() {
+  const menu = $('#ballMenu');
+  menu.hidden = false;
+  $('#ball').setAttribute('aria-expanded', 'true');
+  const b = $('#btnMiniMenu');
+  if (b) b.setAttribute('aria-expanded', 'true');
+  const first = menu.querySelector('.ballmenu__item');
+  if (first) { try { first.focus(); } catch { /* ignore */ } }
+}
+
+function closeMenu() {
+  const menu = $('#ballMenu');
+  if (menu.hidden) return false;
+  menu.hidden = true;
+  $('#ball').setAttribute('aria-expanded', 'false');
+  const b = $('#btnMiniMenu');
+  if (b) b.setAttribute('aria-expanded', 'false');
+  if (menu.contains(document.activeElement)) { try { document.activeElement.blur(); } catch { /* ignore */ } }
+  return true;
+}
+
+function bindStatic() {
+  /* ---- 球 ---- */
+  const ball = $('#ball');
+  ball.addEventListener('click', () => { closeMenu(); goState('mini'); });
+  ball.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    // 球态窗口只有 48×48，菜单放不下 —— 先撑到 mini 再弹（窗口物理约束，不是偷懒）
+    if (store.mode === 'ball') goState('mini');
+    setTimeout(() => { openMenu(); toast('球态窗口装不下菜单，已打开小窗'); }, 60);
+  });
+  const miniMenuBtn = $('#btnMiniMenu');
+  miniMenuBtn.addEventListener('click', () => { if (!closeMenu()) openMenu(); });
+
+  /* ---- 放大 / 收起 ---- */
+  $('#btnEnlarge').addEventListener('click', () => {
+    goState('full');
+    toast('已放大 · 流不中断（同一会话、同一份事件日志）');
+  });
+  $('#btnCollapse').addEventListener('click', () => {
+    goState('mini');
+    toast('已收起为小窗 · 流不中断');
+  });
+  $('#btnMiniCollapse').addEventListener('click', () => goState('ball'));
+
+  /* ---- 发送 / 中断 ---- */
+  $('#btnSend').addEventListener('click', () => { void send(); });
+  $('#btnAbort').addEventListener('click', () => { void doAbort(); });
+
+  /* ---- 审批横幅：有未决审批时显示，点「展开」滚动到卡（卡在对话流里） ---- */
+  $('#btnBannerExpand').addEventListener('click', () => {
+    const card = $('#miniBody') && $('#miniBody').querySelector('.approval');
+    if (card) {
+      try { card.scrollIntoView({ block: 'nearest' }); } catch { /* ignore */ }
+      // 把焦点给第一个按钮，键盘用户直达
+      const b = card.querySelector('[data-approval-action]');
+      if (b && !b.disabled) { try { b.focus(); } catch { /* ignore */ } }
+    } else {
+      toast('当前没有等待确认的操作', 'warn');
+    }
+  });
+
+  /* ---- 输入框：Enter 发送 / Shift+Enter 换行 ---- */
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void send();
+    }
+  });
+  inputEl.addEventListener('input', autoGrowInput);
+
+  /* ---- 新会话 ---- */
+  const newSession = () => {
+    void (async () => {
+      pushNote(`已新建会话（场景 ${store.scene}）`);
+      await connectSession(store.scene);
+      toast('已新建会话');
+    })();
+  };
+  $('#btnNewSession').addEventListener('click', newSession);
+
+  /* ---- 菜单项 ---- */
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    if (!t.closest('#ballMenu')) closeMenu();
+
+    const mi = t.closest('[data-ballmenu]');
+    if (mi) {
+      const kind = mi.getAttribute('data-ballmenu');
+      closeMenu();
+      if (kind === 'new') newSession();
+      else if (kind === 'hide30') toast('已隐藏 30 分钟（免打扰；本期只做 UI 反馈，未接主进程）');
+      else if (kind === 'full') goState('full');
+      else if (kind === 'quit') { void Promise.resolve(host.quit()).catch(() => {}); }
+      return;
+    }
+
+    const sceneBtn = t.closest('[data-scene]');
+    if (sceneBtn) {
+      const id = sceneBtn.getAttribute('data-scene');
+      if (id === store.scene && store.session) { toast(`已经是 ${id} 场景`); return; }
+      void (async () => {
+        pushNote(`已切换到 ${id} 场景（新建会话：cwd 与工具白名单随之变化）`);
+        try { await host.setSettings({ sceneId: id }); } catch { /* 设置写失败不致命 */ }
+        store.scene = id;
+        renderChrome();
+        await connectSession(id);
+        toast(`已切到场景 ${id}`);
+      })();
+      return;
+    }
+
+    const think = t.closest('[data-think]');
+    if (think) {
+      const segId = think.getAttribute('data-think');
+      // 用「被点的那个按钮属于哪个视图」来定视图，而不是当前 mode：
+      // 两个容器一直在 DOM 里，避免点到大窗的节点却改了小窗的状态。
+      const view = think.closest('#fullTree') ? 'full' : 'mini';
+      const explicit = store.fold[view][segId];
+      const isOpen = explicit === undefined ? view === 'full' : explicit === true;
+      store.fold[view][segId] = !isOpen;
+      markStructure();
+      return;
+    }
+
+    const toolAny = t.closest('[data-tool]');
+    if (toolAny) {
+      const segId = toolAny.getAttribute('data-tool');
+      store.toolOpen[segId] = !(store.toolOpen[segId] === true);
+      markStructure();
+      return;
+    }
+
+    /* ---- 产出卡片三按钮 + 降级复制 ---- */
+    const ocOpen = t.closest('[data-outcome-open]');
+    if (ocOpen) { void doOutcomeOpen(ocOpen.getAttribute('data-outcome-open')); return; }
+
+    const ocSave = t.closest('[data-outcome-saveas]');
+    if (ocSave) { void doOutcomeSaveAs(ocSave.getAttribute('data-outcome-saveas')); return; }
+
+    const ocRevise = t.closest('[data-outcome-revise]');
+    if (ocRevise) { doOutcomeRevise(ocRevise.getAttribute('data-outcome-revise')); return; }
+
+    const ocCopy = t.closest('[data-outcome-copy]');
+    if (ocCopy) { void doOutcomeCopyInline(ocCopy.getAttribute('data-outcome-copy')); return; }
+
+    /* ---- 审批卡三按钮（动作值以 data-approval-action 为准） ---- */
+    const apAct = t.closest('[data-approval-action]');
+    if (apAct) {
+      const approvalId = apAct.getAttribute('data-approval-target');
+      const action = apAct.getAttribute('data-approval-action');
+      // 读勾选框状态：只对 allowOnce 有意义（doApprovalDecide 内部会忽略其余 action）
+      let remember = false;
+      const box = apAct.closest('.approval');
+      if (box) {
+        const cb = box.querySelector('[data-approval-remember]');
+        remember = !!(cb && cb.checked);
+      }
+      doApprovalDecide(approvalId, action, remember, box);
+      return;
+    }
+
+    const copyBtn = t.closest('[data-copy]');
+    if (copyBtn) {
+      void doCopy(copyRegistry.get(copyBtn) || '', copyBtn);
+      return;
+    }
+    const copyErr = t.closest('[data-copy-error]');
+    if (copyErr) {
+      void doCopy(copyRegistry.get(copyErr) || '', copyErr);
+      return;
+    }
+
+    const link = t.closest('a[data-extlink]');
+    if (link) {
+      e.preventDefault();
+      const href = link.getAttribute('href') || '';
+      void doCopy(href, null, `链接已复制：${href}`);
+      return;
+    }
+
+    const retryConn = t.closest('[data-retry-conn]');
+    if (retryConn) { void connectSession(store.scene); return; }
+
+    const retryTurn = t.closest('[data-retry-turn]');
+    if (retryTurn) {
+      const t2 = store.cur;
+      const q = t2 ? [...t2.segments].reverse().find((s) => s.kind === 'user') : null;
+      if (q && q.text) {
+        if (t2) { t2.status = 'done'; t2.error = null; }
+        markStructure();
+        void send(q.text);
+      } else {
+        toast('找不到上一句提问，请手动重新输入', 'warn');
+      }
+      return;
+    }
+
+    const act = t.closest('[data-action="newsession"]');
+    if (act) newSession();
+  });
+
+  /* ---- 键盘：Esc 收起 ---- */
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (closeMenu()) { e.preventDefault(); return; }
+    if (store.mode === 'full') { e.preventDefault(); goState('mini'); return; }  // §4.1：Full → Mini
+    if (store.mode === 'mini') { e.preventDefault(); goState('ball'); return; }   // 小窗 → 球
+  });
+
+  window.addEventListener('beforeunload', teardown);
+}
+
+function autoGrowInput() {
+  const rows = Math.min(5, Math.max(2, (inputEl.value.match(/\n/g) || []).length + 2));
+  inputEl.rows = rows;
+}
+
+/** 中断当前轮（「中断」按钮与 mock 控制台共用同一路径）。 */
+async function doAbort() {
+  if (!store.session) { toast('还没有会话可中断', 'warn'); return; }
+  try {
+    await host.abort({ sessionId: store.session.sessionId });
+    store.aborted = true;
+    // 本地立刻收口：即使主进程那轮的 agent_settled 迟到（甚至不来），
+    // UI 也不会卡在「流式中」。迟到的那条由 abortSettleGate 吃掉。
+    abortSettleGate += 1;
+    abortSettleGateAt = Date.now();
+    const t = store.cur;
+    if (t && t.status === 'streaming') {
+      t.status = 'aborted';
+      t.settledAt = Date.now();
+      closeOpenSegs(t);
+    }
+    setStreaming(false);
+    store.queueCount = 0;
+    setBall('idle');
+    markStructure();
+    toast('已中断这一轮');
+  } catch (err) {
+    toast(`中断失败：${parseErrorMessage(err).detail}`, 'err');
+  }
+}
+
+/** 复制：优先 navigator.clipboard，失败退 document.execCommand。 */
+async function doCopy(text, btn, okMsg) {
+  const val = String(text || '');
+  if (!val) { toast('没有可复制的内容', 'warn'); return; }
+  const flash = (label) => {
+    if (!btn) { toast(okMsg || label); return; }
+    const old = btn.textContent;
+    btn.textContent = label;
+    setTimeout(() => { if (btn.isConnected) btn.textContent = old; }, 1600);
+  };
+  const fallback = () => {
+    try {
+      if (typeof document.execCommand !== 'function') throw new Error('execCommand 不可用');
+      const ta = document.createElement('textarea');
+      ta.value = val;
+      ta.setAttribute('readonly', 'readonly');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      if (!ok) throw new Error('execCommand 返回 false');
+      flash('已复制');
+    } catch {
+      toast('复制失败：请手动选中复制', 'err');
+    }
+  };
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try { await navigator.clipboard.writeText(val); flash('已复制'); return; }
+    catch { fallback(); return; }
+  }
+  fallback();
+}
+
+/* ==========================================================================
+ * 产出卡片动作（三按钮 + 降级复制）
+ * ========================================================================== */
+
+/** 在 store 的所有轮次里按 outcomeId 找一张产出卡片（渲染与动作共用）。 */
+function findOutcomeCard(outcomeId) {
+  for (const t of store.turns) {
+    if (!Array.isArray(t.outcomes)) continue;
+    const c = t.outcomes.find((x) => x.outcomeId === outcomeId);
+    if (c) return c;
+  }
+  return null;
+}
+
+/** [打开] → host.openOutcome({ outcomeId })。失败给可读提示 + 重试入口（toast 文案里点不动，故提示重试）。 */
+async function doOutcomeOpen(outcomeId) {
+  if (!outcomeId) return;
+  try {
+    const r = await host.openOutcome({ outcomeId });
+    if (r && r.ok === false) toast('打开失败：产出物不存在或已被移动', 'warn');
+  } catch (err) {
+    const parsed = parseErrorMessage(err);
+    toast(`打开失败：${parsed.detail}（可点「另存为」换位置）`, 'err');
+  }
+}
+
+/** [另存为] → host.saveOutcomeAs({ outcomeId })；用户取消不算错误。 */
+async function doOutcomeSaveAs(outcomeId) {
+  if (!outcomeId) return;
+  try {
+    const r = await host.saveOutcomeAs({ outcomeId });
+    if (r && r.canceled) return;                       // 取消：静默
+    if (r && r.savedPath) toast(`已另存为：${r.savedPath}`);
+    else if (r && r.savedPath === null) toast('另存失败：无法写入目标位置', 'warn');
+  } catch (err) {
+    const parsed = parseErrorMessage(err);
+    toast(`另存失败：${parsed.detail}`, 'err');
+  }
+}
+
+/**
+ * [再改改] → 往输入框预填「基于刚才的《{title}》再改改：」并**把焦点给输入框**。
+ * 不自动发送 —— 让用户补完那句话再发（保留控制权）。
+ */
+function doOutcomeRevise(outcomeId) {
+  const card = findOutcomeCard(outcomeId);
+  if (!card) { toast('找不到这张产出了（可能已被清理）', 'warn'); return; }
+  const title = card.title || card.fileName || '产出';
+  const prefix = `基于刚才的《${title}》再改改：`;
+  inputEl.value = prefix;
+  autoGrowInput();
+  // 小窗/大窗下输入框都在 DOM 里；确保当前形态能看到输入框（球态先撑到小窗）
+  if (store.mode === 'ball') goState('mini');
+  try {
+    inputEl.focus();
+    // 光标落到句末，用户直接接着打字
+    const end = inputEl.value.length;
+    inputEl.setSelectionRange(end, end);
+  } catch { /* ignore */ }
+  toast('已填入输入框，补完这句话再发送');
+}
+
+/**
+ * 降级③（落盘失败）：把卡片里的 `inlineText` 复制到剪贴板。
+ * 成功后 toast 提示；「绝不空手而归」。
+ */
+async function doOutcomeCopyInline(outcomeId) {
+  const card = findOutcomeCard(outcomeId);
+  if (!card || typeof card.inlineText !== 'string' || !card.inlineText) {
+    toast('没有可复制的内容', 'warn');
+    return;
+  }
+  const ok = await copyToClipboard(card.inlineText);
+  if (ok) toast('已复制产出内容到剪贴板');
+  else toast('复制失败：请手动选中复制', 'err');
+}
+
+/** 复制到剪贴板：优先 navigator.clipboard，失败退 execCommand。返回是否成功。 */
+async function copyToClipboard(val) {
+  const text = String(val ?? '');
+  if (!text) return false;
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* 落到 fallback */ }
+  }
+  try {
+    if (typeof document.execCommand !== 'function') return false;
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', 'readonly');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+
+/* ---- 热键（主进程推送） ---- */
+function handleHotkey(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  if (payload.action === 'toggle') {
+    // ⚠ 主进程在推 hotkey 之前已经自己 toggle 过窗口（wm.toggle()），
+    //    这里**绝不能再调 setWindowState**，否则会来回翻。
+    if (store.mode === 'mini') { try { inputEl.focus(); } catch { /* ignore */ } }
+    return;
+  }
+  if (payload.action === 'grabSelection') {
+    const sel = typeof payload.selection === 'string' ? payload.selection.trim() : '';
+    if (payload.ok === true && sel) {
+      inputEl.value = sel;
+      autoGrowInput();
+      void send(sel);
+    } else {
+      toast('没抓到选中文字，请手动 Ctrl+C 后再按热键（Alt+Shift+Space）', 'warn');
+    }
+    return;
+  }
+}
+
+/* ==========================================================================
+ * I. mock 宿主（无 window.minipi 时启用；假事件流演示，便于单独验收 UI）
+ * ========================================================================== */
+const MOCK_ANSWER = [
+  '## 结论',
+  '',
+  '把 `L(θ)` 在当前点做**泰勒展开**时，一阶项决定梯度方向，二阶项的系数带 `α²`——`α` 很小时它是高阶小量，贡献 `O(α²)` 会被一阶项 `O(α)` 淹没。',
+  '',
+  '- 一阶项 `O(α)`，二阶项 `O(α²)`',
+  '- 前提：`α → 0` 且 `L` 二阶连续可导',
+  '- 病态曲率方向上舍去会带来明显偏差',
+  '',
+  '```python',
+  'theta = theta - alpha * grad(theta)   # 只保留一阶项',
+  '# 课本省略的前提：alpha -> 0 且 L 二阶连续可导',
+  '```',
+  '',
+  // 下面这个 URL 只是 mock 数据里的**字符串**，用来验证 Markdown 链接渲染与协议白名单。
+  // 它不会产生任何网络请求：`.invalid` 是保留 TLD（永远不解析），
+  // 且渲染出来的 <a> 在点击时被 preventDefault 拦下（只复制链接，不跳转）。
+  '详见 [lecture03.pdf 第 7 页](https://example.invalid/lecture03.pdf)。',
+].join('\n');
+
+const MOCK_THINK = '选区来自 lecture03.pdf 第 7 页的一阶泰勒展开段落；用户问的是「为什么能丢掉二阶项」。'
+  + '回答需要说清前提（α→0 且 L 二阶连续可导），并给出反例，否则只是复述课本。';
+
+function createMockHost() {
+  const listeners = { event: [], windowState: [], hotkey: [], outcome: [], approval: [] };
+  let seq = 0;
+  let sessionNo = 0;
+  let currentSession = null;
+  let runToken = 0;
+  let outcomeNo = 0;
+  let approvalNo = 0;
+  const outcomeStore = new Map();   // outcomeId → 卡片（供 open / saveAs / inline 复制查）
+  const approvalStore = new Map();  // approvalId → 卡（供 decide / 超时演示）
+  const timers = new Set();
+  const settings = {
+    version: 1, sceneId: 'quick', noFocusSteal: false,
+    window: { state: 'ball', positions: { ball: null, mini: null, full: null } },
+  };
+
+  const say = (list, payload) => { for (const h of list) { try { h(payload); } catch (e) { console.error(e); } } };
+  const emitEvent = (event) => {
+    seq += 1;
+    say(listeners.event, { seq, sessionId: currentSession, ts: Date.now(), event });
+  };
+  const sleep = (ms) => new Promise((r) => {
+    const id = setTimeout(() => { timers.delete(id); r(); }, ms);
+    timers.add(id);
+  });
+
+  async function scriptedAnswer(text, opts) {
+    const token = ++runToken;
+    const guard = () => { if (token !== runToken) throw new Error('__cancelled__'); };
+    const emit = (e) => { guard(); emitEvent(e); };
+    try {
+      emit({ type: 'agent_start' });
+      await sleep(60); guard();
+      emit({ type: 'turn_start' });
+      emit({ type: 'message_start', messageRole: 'user', message: { role: 'user', content: text } });
+      emit({ type: 'message_start', messageRole: 'assistant' });
+
+      if (opts && opts.fail) {
+        for (const ch of '我先看一下这个问题的上下文……') { emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: ch } }); await sleep(24); }
+        emit({
+          type: 'error',
+          errorMessage: 'PI_UNAVAILABLE: 模型服务暂时不可用（mock 演示，可点「重试」）',
+        });
+        emit({ type: 'turn_end' });
+        emit({ type: 'agent_end' });
+        emit({ type: 'agent_settled' });
+        return;
+      }
+
+      /* 思考段：小窗默认收起，大窗默认展开 */
+      emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_start' } });
+      for (let i = 0; i < MOCK_THINK.length; i += 6) {
+        emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: MOCK_THINK.slice(i, i + 6) } });
+        await sleep(18);
+      }
+      emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_end' } });
+
+      /* 正文前段 */
+      const head = MOCK_ANSWER.slice(0, 90);
+      const tail = MOCK_ANSWER.slice(90);
+      emit({ type: 'message_update', assistantMessageEvent: { type: 'text_start' } });
+      for (let i = 0; i < head.length; i += 3) {
+        emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: head.slice(i, i + 3) } });
+        await sleep(26);
+      }
+
+      if (opts && opts.tool) {
+        emit({ type: 'message_update', assistantMessageEvent: { type: 'text_end' } });
+        emit({ type: 'message_end', messageRole: 'assistant' });
+        emit({
+          type: 'tool_execution_start',
+          toolCallId: 'tc_1',
+          toolName: 'read',
+          args: { path: '~/.minipi/outbox/lecture03.md', offset: 1, limit: 60 },
+        });
+        await sleep(220); guard();
+        emit({ type: 'queue_update', steering: ['顺便把 Hessian 的直觉也讲一下'], followUp: [] });
+        await sleep(260); guard();
+        emit({
+          type: 'tool_execution_end',
+          toolCallId: 'tc_1',
+          isError: false,
+          durationMs: 42,
+          result: '已读 1.2 KB · 命中 1 处「second-order」',
+        });
+        emit({ type: 'queue_update', steering: [], followUp: [] });
+        emit({ type: 'message_start', messageRole: 'assistant' });
+        emit({ type: 'message_update', assistantMessageEvent: { type: 'text_start' } });
+      }
+
+      for (let i = 0; i < tail.length; i += 3) {
+        emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: tail.slice(i, i + 3) } });
+        await sleep(22);
+      }
+      emit({ type: 'message_update', assistantMessageEvent: { type: 'text_end' } });
+      emit({ type: 'message_end', messageRole: 'assistant' });
+      emit({ type: 'turn_end' });
+      await sleep(40); guard();
+      emit({ type: 'agent_end' });
+      emit({ type: 'agent_settled' });
+    } catch (err) {
+      if (!(err && err.message === '__cancelled__')) console.error('[minipi:mock] 脚本事件流异常', err);
+    }
+  }
+
+  return {
+    __mock: true,
+    createSession({ sceneId } = {}) {
+      sessionNo += 1;
+      currentSession = `s_${sessionNo}`;
+      seq = 0;
+      runToken += 1;   // 作废上一轮的脚本流
+      settings.sceneId = sceneId || 'quick';
+      return new Promise((resolve) => {
+        const id = setTimeout(() => {
+          timers.delete(id);
+          resolve({ sessionId: currentSession, sceneId: settings.sceneId, model: 'mock/deepseek-mock-1', lastSeq: 0 });
+        }, 160);
+        timers.add(id);
+      });
+    },
+    sessionState({ sessionId } = {}) {
+      if (sessionId !== currentSession) {
+        return Promise.reject(new Error(errorMessage(ERROR_CODES.SESSION_NOT_FOUND, '会话不存在或已释放')));
+      }
+      const turns = store.turns.length;
+      return Promise.resolve({
+        sessionId: currentSession,
+        model: 'mock/deepseek-mock-1',
+        isStreaming: store.streaming,
+        messageCount: turns * 2,
+        lastSeq: seq,
+        costUsd: turns * 0.00412,
+        sceneId: settings.sceneId,
+        status: store.streaming ? 'streaming' : 'idle',
+      });
+    },
+    prompt({ text, behavior } = {}) {
+      if (!currentSession) return Promise.reject(new Error(errorMessage(ERROR_CODES.SESSION_NOT_FOUND, '会话不存在')));
+      if (!text || !String(text).trim()) return Promise.reject(new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, 'text 不能为空')));
+      if (!behavior) console.warn('[minipi:mock] prompt 未带 behavior（契约要求流式期间必带）');
+      const opts = { tool: store.mockNextTool === true, fail: store.mockNextFail === true };
+      store.mockNextTool = false;
+      store.mockNextFail = false;
+      const id = setTimeout(() => { timers.delete(id); void scriptedAnswer(String(text), opts); }, 20);
+      timers.add(id);
+      return Promise.resolve({ accepted: true });
+    },
+    /** 真宿主 abort 之后 Pi 仍会补发 turn_end / agent_end / agent_settled —— mock 也照做。 */
+    abort() {
+      runToken += 1;
+      const id = setTimeout(() => {
+        timers.delete(id);
+        emitEvent({ type: 'turn_end' });
+        emitEvent({ type: 'agent_end' });
+        emitEvent({ type: 'agent_settled' });
+      }, 120);
+      timers.add(id);
+      return Promise.resolve({ ok: true });
+    },
+    setWindowState({ state }) {
+      settings.window.state = state;
+      const id = setTimeout(() => {
+        timers.delete(id);
+        say(listeners.windowState, { state, bounds: { x: 0, y: 0, width: 0, height: 0 } });
+      }, 0);
+      timers.add(id);
+      return Promise.resolve({ ok: true, bounds: { x: 0, y: 0, width: 0, height: 0 } });
+    },
+
+    /* ---- 产出链路（mock 假实现；不伪造「已落盘」，只驱动 UI） ----
+       ⚠ 这里**不写任何真文件**。卡片数据全部在内存里（outcomeStore），
+         openOutcome / saveOutcomeAs 只做提示，不当成真操作，避免「伪造成功假象」。 */
+    /**
+     * 触发一次假产出。`await sleep(~800ms)` 模拟耗时，然后 `say(listeners.outcome, card)`。
+     * @param {{ sessionId?: string, intent?: string, format?: 'auto'|'md'|'docx', degraded?: boolean, inlineText?: string }} [arg]
+     */
+    async generateOutcome(arg = {}) {
+      // format 语义：'docx' → 产出 docx；'md' → 产出 md；缺省 / 'auto' → 默认 docx（有内容就 docx）
+      const degraded = arg.degraded === true || arg.format === 'md';
+      const format = degraded ? 'md' : 'docx';
+      outcomeNo += 1;
+      const id = `o_${outcomeNo}`;
+      await sleep(800);   // 模拟产出链路耗时（卡片到位即结果，渲染层不需要额外 loading）
+      const day = new Date();
+      const ds = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+      const title = arg.intent ? String(arg.intent).slice(0, 24) : '周报';
+      // 故意给一个**较长**的文件名，用于验证中间截断（360 小窗不溢出）
+      const fileName = `${title}-${ds}-最终版${format === 'docx' ? '.docx' : '.md'}`;
+      const card = {
+        outcomeId: id,
+        sessionId: arg.sessionId || currentSession || 's_unknown',
+        format,
+        degraded,
+        fileName,
+        bytes: format === 'docx' ? 12876 : 3412,
+        title,
+        createdAt: Date.now(),
+        actions: ['open', 'saveAs', 'revise'],
+        // 只有「降级③（落盘失败）」才带 inlineText —— 由 mock 控制台的「产出降级 md（落盘失败）」注入
+        inlineText: typeof arg.inlineText === 'string' ? arg.inlineText : undefined,
+      };
+      outcomeStore.set(id, card);
+      say(listeners.outcome, card);
+      return {
+        outcomeId: id, format, fileName, absPath: `(mock)~/.minipi/outbox/${fileName}`,
+        degraded, bytes: card.bytes, createdAt: card.createdAt,
+      };
+    },
+    /** 「打开」：mock 只做提示（不调 shell）。 */
+    openOutcome({ outcomeId } = {}) {
+      if (!outcomeStore.has(outcomeId)) {
+        return Promise.reject(new Error(errorMessage(ERROR_CODES.OUTCOME_NOT_FOUND, '产出物不存在或已被移动')));
+      }
+      toast(`mock：假装用系统程序打开 ${outcomeStore.get(outcomeId).fileName}`);
+      return Promise.resolve({ ok: true });
+    },
+    /** 「另存为」：mock 只做提示，返回假的 savedPath。 */
+    saveOutcomeAs({ outcomeId } = {}) {
+      if (!outcomeStore.has(outcomeId)) {
+        return Promise.reject(new Error(errorMessage(ERROR_CODES.OUTCOME_NOT_FOUND, '产出物不存在或已被移动')));
+      }
+      const c = outcomeStore.get(outcomeId);
+      toast(`mock：假装另存为 C:/Users/you/Desktop/${c.fileName}`);
+      return Promise.resolve({ savedPath: `C:/Users/you/Desktop/${c.fileName}`, canceled: false });
+    },
+    /** 历史产出清单（Full 态可选功能）—— mock 返回内存里的全部。 */
+    listOutcomes({ limit } = {}) {
+      const items = [...outcomeStore.values()].sort((a, b) => b.createdAt - a.createdAt);
+      return Promise.resolve({ items: typeof limit === 'number' ? items.slice(0, limit) : items });
+    },
+    onOutcome(h) { listeners.outcome.push(h); return () => { listeners.outcome = listeners.outcome.filter((x) => x !== h); }; },
+
+    /* ---- 审批闸门（mock 假实现；不伪造「已执行」，只驱动 UI 三态） ----
+       ⚠ 这里**不真跑命令、不真写文件**，只按 §9.3 造卡 / 更新 / 撤回。
+         decide 只做提示并推 cancel，模拟「服务端处理完 → 撤卡」。 */
+    /**
+     * 造一张审批卡并推送。三种 kind 各给一例，覆盖 diff / preview / 高危命令。
+     * @param {'write'|'edit'|'command'|'mixed'} kind
+     * @param {{ timeoutMs?: number }} [opt]
+     */
+    __pushApproval(kind = 'edit', opt = {}) {
+      approvalNo += 1;
+      const id = `a_${approvalNo}`;
+      const timeoutMs = typeof opt.timeoutMs === 'number' ? opt.timeoutMs : APPROVAL_TIMEOUT_MS;
+      const now = Date.now();
+      const batch = [];
+      if (kind === 'write' || kind === 'mixed') {
+        batch.push({
+          kind: 'write', toolName: 'write', title: '写入文件', path: '~/.minipi/repo/docs/学习笔记.md',
+          bytes: 2048, preview: '# 学习笔记\n\n- 一阶泰勒展开\n- 二阶项在 α→0 时可忽略\n', overwrite: false,
+        });
+      }
+      if (kind === 'edit' || kind === 'mixed') {
+        batch.push({
+          kind: 'edit', toolName: 'edit', title: '修改文件', path: '~/.minipi/repo/src/main/pi/session.js',
+          diff: '@@ edit 1/1\n- const timeout = 30000;\n+ const timeout = 60000;\n  // 上行改为 60s',
+          diffStat: { added: 1, removed: 1 }, tooLargeToDiff: false,
+        });
+      }
+      if (kind === 'command' || kind === 'mixed') {
+        batch.push({
+          kind: 'command', toolName: 'bash', title: '执行命令', shell: 'bash',
+          command: 'rm -rf node_modules && npm ci', timeoutSec: 120, risk: 'high',
+        });
+      }
+      if (batch.length === 0) {
+        batch.push({ kind: 'edit', toolName: 'edit', title: '修改文件', path: '~/.minipi/repo/a.js',
+          diff: '@@ edit 1/1\n- a\n+ b', diffStat: { added: 1, removed: 1 }, tooLargeToDiff: false });
+      }
+      const card = {
+        approvalId: id,
+        sessionId: currentSession || 's_unknown',
+        phase: 'push',
+        kind: batch.length > 1 ? null : batch[0].kind,
+        toolName: batch.length > 1 ? null : batch[0].toolName,
+        title: batch.length > 1 ? `${APPROVAL_KIND_LABEL[batch[0].kind]}（${batch.length} 项）` : APPROVAL_KIND_LABEL[batch[0].kind],
+        actions: APPROVAL_ACTION_IDS,
+        alwaysAllowEligible: batch.length === 1,
+        createdAt: now,
+        expiresAt: now + timeoutMs,
+        timeoutMs,
+        batch,
+      };
+      approvalStore.set(id, card);
+      say(listeners.approval, card);
+      return id;
+    },
+    /** 就地把某张卡换成 update（合并新增条目）—— 演示 phase:"update"。 */
+    __updateApproval(id) {
+      const c = approvalStore.get(id);
+      if (!c) return false;
+      const merged = {
+        ...c, phase: 'update',
+        batch: c.batch.concat([{
+          kind: 'command', toolName: 'bash', title: '执行命令', shell: 'bash',
+          command: 'git push origin main', timeoutSec: null, risk: 'normal',
+        }]),
+        alwaysAllowEligible: false,
+      };
+      approvalStore.set(id, merged);
+      say(listeners.approval, merged);
+      return true;
+    },
+    /** 撤回某张卡（模拟超时 / 会话销毁 / alwaysAllow 命中）。 */
+    __cancelApproval(id) {
+      const c = approvalStore.get(id);
+      if (!c) return false;
+      approvalStore.delete(id);
+      say(listeners.approval, { approvalId: id, phase: 'cancel', sessionId: c.sessionId, createdAt: c.createdAt, expiresAt: c.expiresAt, timeoutMs: c.timeoutMs, actions: APPROVAL_ACTION_IDS, batch: [] });
+      return true;
+    },
+    /** decide：mock 只提示 + 推 cancel（模拟服务端处理完撤卡）。 */
+    approvalDecide({ approvalId, action, remember } = {}) {
+      const c = approvalStore.get(approvalId);
+      if (!c) {
+        return Promise.reject(new Error(errorMessage(ERROR_CODES.APPROVAL_NOT_FOUND, '审批不存在或已决')));
+      }
+      approvalStore.delete(approvalId);
+      const label = APPROVAL_ACTION_LABEL[action] || action;
+      toast(`mock：审批「${label}」已提交${remember ? '（本会话总是允许）' : ''}`);
+      const t = setTimeout(() => {
+        timers.delete(t);
+        say(listeners.approval, { approvalId, phase: 'cancel', sessionId: c.sessionId, createdAt: c.createdAt, expiresAt: c.expiresAt, timeoutMs: c.timeoutMs, actions: APPROVAL_ACTION_IDS, batch: [] });
+      }, 260);
+      timers.add(t);
+      return Promise.resolve({ ok: true });
+    },
+    onApproval(h) { listeners.approval.push(h); return () => { listeners.approval = listeners.approval.filter((x) => x !== h); }; },
+
+    getSettings() { return Promise.resolve(JSON.parse(JSON.stringify(settings))); },
+    setSettings(partial) { Object.assign(settings, partial || {}); return Promise.resolve(JSON.parse(JSON.stringify(settings))); },
+    quit() { toast('mock 模式：quit() 只做提示'); return Promise.resolve(); },
+    onEvent(h) { listeners.event.push(h); return () => { listeners.event = listeners.event.filter((x) => x !== h); }; },
+    onWindowState(h) { listeners.windowState.push(h); return () => { listeners.windowState = listeners.windowState.filter((x) => x !== h); }; },
+    onHotkey(h) { listeners.hotkey.push(h); return () => { listeners.hotkey = listeners.hotkey.filter((x) => x !== h); }; },
+    /* 给 mock 控制台用 */
+    __pushHotkey(p) { say(listeners.hotkey, p); },
+    /** 静默作废当前脚本流（不补 settle 事件）—— 用于 reset / 边界态演示 */
+    __cancel() { runToken += 1; },
+    /** 模拟真宿主：Pi 每次新建会话，seq 都从 1 重新开始 */
+    __resetSeq() { seq = 0; },
+    __seq() { return seq; },
+    /** 产出卡片计数（清空 store 时一并复位，避免 outcomeId 与显示不一致） */
+    __outcomeCount() { return outcomeNo; },
+    /** 审批卡计数（mock 生成过多少张） */
+    __approvalCount() { return approvalNo; },
+    /** 最近一张未决审批的 id（供「就地更新一张」按钮定位） */
+    __lastApprovalId() { return approvalStore.size ? [...approvalStore.keys()][approvalStore.size - 1] : null; },
+  };
+}
+
+function bindMockPanel() {
+  const panel = $('#mockPanel');
+  if (!panel || !mockHost) return;
+  panel.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    const btn = t.closest('[data-mock]');
+    if (!btn) return;
+    const kind = btn.getAttribute('data-mock');
+    if (kind.startsWith('mode-')) {
+      goState(kind.slice(5));
+      return;
+    }
+    if (kind.startsWith('ball-')) {
+      setBall(kind.slice(5));
+      store.mode = 'ball';
+      renderMode();
+      return;
+    }
+    switch (kind) {
+      case 'stream':
+        store.mockNextTool = false;
+        store.mockNextFail = false;
+        if (!store.session) { toast('先等会话连上', 'warn'); return; }
+        void send('这段梯度推导里为什么能把二阶项丢掉？');
+        break;
+      case 'tool':
+        store.mockNextTool = true;
+        store.mockNextFail = false;
+        void send('读一下 lecture03.md，然后告诉我二阶项在哪一段');
+        break;
+      case 'fail':
+        store.mockNextFail = true;
+        store.mockNextTool = false;
+        void send('触发一次失败（mock）');
+        break;
+      case 'abort':
+        void doAbort();
+        break;
+      case 'conn-loading':
+        mockHost.__cancel();
+        abortSettleGate = 0;
+        store.turns = [];
+        store.cur = null;
+        store.seq.seen = 0;
+        store.seq.lastSeq = 0;
+        store.session = null;
+        setConn('connecting');
+        setTimeout(() => { if (store.conn === 'connecting') { store.connSlow = true; markStructure(); } }, 3200);
+        break;
+      case 'conn-error':
+        mockHost.__cancel();
+        setConn('error', {
+          code: ERROR_CODES.PI_UNAVAILABLE,
+          detail: 'Pi 凭据 / 模型目录不可用（需 ~/.pi/agent/auth.json 里至少一个可用 provider）：mock 演示',
+          raw: 'PI_UNAVAILABLE: mock 演示用的假错误（这条是原始串，用于验证可读性）',
+        });
+        break;
+      case 'reset':
+        mockHost.__cancel();
+        mockHost.__resetSeq();
+        abortSettleGate = 0;
+        store.turns = [];
+        store.cur = null;
+        store.queueCount = 0;
+        store.seq.perSession = new Map();
+        store.seq.seen = 0;
+        store.seq.dupes = 0;
+        store.seq.gaps = 0;
+        store.seq.lastSeq = 0;
+        store.autoRetry = null;
+        store.approvals.clear();     // 清空审批卡（回到空状态）
+        setBall('idle');
+        setConn('ready');
+        if (!store.session) void connectSession(store.scene);
+        break;
+      case 'newsession':
+        pushNote('已新建会话（mock）');
+        void connectSession(store.scene);
+        break;
+      case 'hk-toggle':
+        if (store.mode === 'ball') goState('mini'); else goState('ball');
+        mockHost.__pushHotkey({ action: 'toggle' });
+        break;
+      case 'hk-grab-ok':
+        goState('mini');
+        mockHost.__pushHotkey({ action: 'grabSelection', selection: 'The second-order term is dropped because its contribution is O(α²)', ok: true });
+        break;
+      case 'hk-grab-fail':
+        goState('mini');
+        mockHost.__pushHotkey({ action: 'grabSelection', selection: null, ok: false });
+        break;
+      case 'outcome-docx':
+        // 先确保不是球态（球态看不见卡片），再触发假产出
+        if (store.mode === 'ball') goState('mini');
+        void mockHost.generateOutcome({ sessionId: store.session ? store.session.sessionId : undefined, intent: '周报', format: 'docx' })
+          .catch(() => {});
+        break;
+      case 'outcome-md':
+        if (store.mode === 'ball') goState('mini');
+        void mockHost.generateOutcome({ sessionId: store.session ? store.session.sessionId : undefined, intent: '会议纪要', format: 'md', degraded: true })
+          .catch(() => {});
+        break;
+      case 'outcome-inline':
+        // 降级③（落盘失败）：卡片给「复制内容」而非「打开」
+        if (store.mode === 'ball') goState('mini');
+        void mockHost.generateOutcome({
+          sessionId: store.session ? store.session.sessionId : undefined,
+          intent: '提纲', format: 'md', degraded: true,
+          inlineText: '# 提纲\n\n- 背景：这是落盘失败时的兜底内容\n- 结论：卡片改为「复制内容」，绝不空手而归\n',
+        }).catch(() => {});
+        break;
+      case 'approval-write':
+        if (store.mode === 'ball') goState('mini');
+        mockHost.__pushApproval('write');
+        break;
+      case 'approval-edit':
+        if (store.mode === 'ball') goState('mini');
+        mockHost.__pushApproval('edit');
+        break;
+      case 'approval-command':
+        if (store.mode === 'ball') goState('mini');
+        mockHost.__pushApproval('command');
+        break;
+      case 'approval-mixed':
+        if (store.mode === 'ball') goState('mini');
+        mockHost.__pushApproval('mixed');
+        break;
+      case 'approval-short':
+        // 短超时：观察倒计时到 0 后置灰 + 「已超时，已拒绝」（等后端 cancel 才撤回）
+        if (store.mode === 'ball') goState('mini');
+        mockHost.__pushApproval('edit', { timeoutMs: 8000 });
+        break;
+      case 'approval-update': {
+        const lastId = mockHost.__lastApprovalId();
+        if (!lastId) { toast('还没有未决审批卡', 'warn'); break; }
+        mockHost.__updateApproval(lastId);
+        toast('已就地更新该卡（新增 1 项，phase=update）');
+        break;
+      }
+      case 'approval-cancel-all': {
+        const ids = [...store.approvals.keys()];
+        if (!ids.length) { toast('还没有未决审批卡', 'warn'); break; }
+        for (const id of ids) mockHost.__cancelApproval(id);
+        toast(`已撤回 ${ids.length} 张审批卡`);
+        break;
+      }
+      default:
+        break;
+    }
+  });
+}
+
+/* ==========================================================================
+ * J. 启动
+ * ========================================================================== */
+function teardown() {
+  if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+  if (slowTimer.id) { clearTimeout(slowTimer.id); slowTimer.id = null; }
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  if (approvalTimer) { clearInterval(approvalTimer); approvalTimer = null; }
+  for (const un of unsubs) { try { un(); } catch { /* ignore */ } }
+  unsubs.length = 0;
+}
+const unsubs = [];
+/** 审批倒计时：1s 只刷可见倒计时文本，不触发整树重渲染。 */
+let approvalTimer = null;
+
+async function boot() {
+  store.mock = !realHost;
+  if (store.mock) {
+    mockHost = createMockHost();
+    host = mockHost;
+  }
+  document.documentElement.dataset.mock = store.mock ? '1' : '0';
+  document.documentElement.dataset.mode = store.mode;
+  $('#mockPanel').hidden = !store.mock;
+  $('#ballMenuHint').textContent = store.mock
+    ? 'mock 模式：菜单项可用；棋盘格 = 透明窗口区域。'
+    : '球态窗口只有 48×48，装不下菜单 —— 打开菜单会先把窗口撑到小窗。';
+
+  bindStatic();
+  bindMockPanel();
+  renderMode();
+  renderBall();
+  renderChrome();
+  markStructure();
+
+  unsubs.push(host.onWindowState((p) => {
+    if (!p || typeof p.state !== 'string') return;
+    store.mode = p.state;
+    renderMode();
+  }));
+  unsubs.push(host.onEvent((wrapped) => {
+    if (!wrapped || typeof wrapped !== 'object') return;
+    if (!acceptSeq(wrapped.sessionId, wrapped.seq)) return;
+    applyEvent(wrapped.event, wrapped.sessionId, wrapped.ts);
+  }));
+  unsubs.push(host.onHotkey(handleHotkey));
+  // 产出卡片推送。真宿主若还没加 onOutcome（白客并行开发中）则跳过 —— 不报错、不崩。
+  if (typeof host.onOutcome === 'function') {
+    unsubs.push(host.onOutcome((card) => applyOutcomeCard(card)));
+  } else {
+    console.warn('[minipi:renderer] host.onOutcome 不存在（主进程尚未接产出链路），产出卡片功能暂不可用');
+  }
+  // 审批卡推送（M4.5）。真宿主未接 onApproval 时跳过 —— 不报错、不崩，与 onOutcome 同款防御。
+  if (typeof host.onApproval === 'function') {
+    unsubs.push(host.onApproval((card) => applyApprovalCard(card)));
+  } else {
+    console.warn('[minipi:renderer] host.onApproval 不存在（主进程尚未接审批闸门），审批卡功能暂不可用');
+  }
+  // 审批倒计时：1s 只刷可见倒计时文本；到 0 置灰（不移除，等后端 cancel）
+  if (approvalTimer) clearInterval(approvalTimer);
+  approvalTimer = setInterval(tickApprovals, 1000);
+
+  // 每 4 秒兜一次会话状态（成本 / 消息数 / lastSeq）；只在没有流式时跑，避免打扰
+  refreshTimer = setInterval(() => { if (!store.streaming) void refreshSessionState(); }, 4000);
+
+  let sceneId = DEFAULT_SCENE_ID;
+  try {
+    const s = await host.getSettings();
+    if (s && isSceneId(s.sceneId)) sceneId = s.sceneId;
+  } catch (err) {
+    console.warn('[minipi:renderer] getSettings 失败（用默认场景）：', String((err && err.message) || err));
+  }
+  store.scene = sceneId;
+  renderChrome();
+  await connectSession(sceneId);
+
+  console.info(`[minipi:renderer] 已就绪 · protocol ${PROTOCOL_VERSION} · ${store.mock ? 'mock 模式（未连接宿主）' : '已连接 window.minipi'}`);
+}
+
+/* ---- 给自动化测试（headless Chrome + CDP）用的只读探针；不暴露任何敏感信息 ---- */
+window.__minipi = {
+  protocolVersion: PROTOCOL_VERSION,
+  mock: () => store.mock,
+  mode: () => store.mode,
+  ball: () => store.ball,
+  conn: () => store.conn,
+  scene: () => store.scene,
+  turns: () => store.turns.length,
+  /** 权威的「已累积文本长度」（store 侧，单调不减） */
+  textLen: () => store.turns.reduce((acc, t) => acc + t.segments.reduce((a, s) => a + (s.text ? s.text.length : 0), 0), 0),
+  /** 小窗主体渲染出来的可见文本长度 */
+  domLen: (which) => {
+    const n = which === 'full' ? $('#fullTree') : $('#miniBody');
+    return n ? n.textContent.length : -1;
+  },
+  /**
+   * 小窗/大窗「已渲染文本长度」：直接读 DOM 里文本节点的长度之和。
+   * 这是「三态切换不重放」的判定口径 —— 流式中来回切形态，它只能不减。
+   */
+  viewTextLen: (which) => {
+    const root = which === 'full' ? $('#fullTree') : $('#miniBody');
+    if (!root) return -1;
+    let len = 0;
+    const walk = (n) => {
+      for (const c of n.childNodes) {
+        if (c.nodeType === 3) len += c.nodeValue.length;
+        else if (c.nodeType === 1) {
+          if (c.classList && (c.classList.contains('codeblock__lang') || c.classList.contains('tooline__chev'))) continue;
+          walk(c);
+        }
+      }
+    };
+    walk(root);
+    return len;
+  },
+  seq: () => ({ seen: store.seq.seen, dupes: store.seq.dupes, gaps: store.seq.gaps, lastSeq: store.seq.lastSeq, sessions: [...store.seq.perSession.keys()] }),
+  /** 注入一个 Pi 原始事件（用来做「跳号 / 重复」的幂等实测） */
+  inject: (sessionId, seq2, event) => {
+    const ok = acceptSeq(sessionId, seq2);
+    if (ok) applyEvent(event, sessionId, Date.now());
+    return ok;
+  },
+  markdownPreview: (src) => {
+    const d = document.createElement('div');
+    d.appendChild(renderMarkdown(String(src)));
+    return d.innerHTML;
+  },
+  /* ---- 产出卡片相关探针（供 headless / 人工验收） ---- */
+  /** 纯函数：文件名中间截断（导出后可直接断言规则） */
+  middleTruncate: (name, maxChars) => middleTruncate(name, maxChars),
+  /** 纯函数：字节数人类可读 */
+  formatBytes: (n) => formatBytes(n),
+  /** store 里的产出卡片数量（所有轮次合计） */
+  outcomeCount: () => store.turns.reduce((acc, t) => acc + (Array.isArray(t.outcomes) ? t.outcomes.length : 0), 0),
+  /** 直接注入一张产出卡片（不走 mock 延时），用于自动化断言渲染结果 */
+  injectOutcome: (card) => { applyOutcomeCard(card); return true; },
+  /** 小窗里产出的可见文本（用于断言截断 / 降级标识 / 溢出） */
+  outcomeDomText: () => {
+    const n = $('#miniBody');
+    if (!n) return '';
+    const c = n.querySelector('.outcome');
+    return c ? c.textContent : '';
+  },
+  /** 小窗产出卡片是否横向溢出（scrollWidth > clientWidth 即溢出） */
+  outcomeOverflow: () => {
+    const n = $('#miniBody');
+    if (!n) return null;
+    const c = n.querySelector('.outcome');
+    if (!c) return null;
+    return { scrollWidth: c.scrollWidth, clientWidth: c.clientWidth, overflows: c.scrollWidth > c.clientWidth + 1 };
+  },
+
+  /* ---- 审批卡相关探针（供 headless / 人工验收，M4.5） ---- */
+  /** store 里的审批卡数量（按 approvalId 计） */
+  approvalCount: () => store.approvals.size,
+  /** 直接注入一张审批卡（不走 mock），用于自动化断言渲染结果 */
+  injectApproval: (card) => { applyApprovalCard(card); return true; },
+  /** 需要我处理的审批卡数量（未过期） */
+  pendingApprovalCount: () => {
+    let n = 0;
+    for (const c of store.approvals.values()) if (!approvalExpired(c)) n += 1;
+    return n;
+  },
+  /** 小窗里审批卡的可见文本 */
+  approvalDomText: () => {
+    const n = $('#miniBody');
+    if (!n) return '';
+    const c = n.querySelector('.approval');
+    return c ? c.textContent : '';
+  },
+  /** 小窗里所有审批卡的可见文本（合并卡/多卡时） */
+  approvalDomTextAll: () => {
+    const n = $('#miniBody');
+    if (!n) return '';
+    return [...n.querySelectorAll('.approval')].map((c) => c.textContent).join('\n---\n');
+  },
+  /** 审批卡 DOM 快照（供断言按钮集 / 勾选框 / 倒计时 / 置灰） */
+  approvalSnapshot: () => {
+    const n = $('#miniBody');
+    if (!n) return null;
+    const c = n.querySelector('.approval');
+    if (!c) return null;
+    const btns = [...c.querySelectorAll('[data-approval-action]')];
+    const cb = c.querySelector('[data-approval-remember]');
+    const timer = c.querySelector('[data-approval-timer]');
+    return {
+      approvalId: c.getAttribute('data-approval-id'),
+      expired: c.classList.contains('approval--expired'),
+      actions: btns.map((b) => b.getAttribute('data-approval-action')),
+      actionLabels: btns.map((b) => b.textContent),
+      buttonsDisabled: btns.map((b) => b.disabled),
+      hasRememberBox: !!cb,
+      rememberChecked: cb ? cb.checked : null,
+      timerText: timer ? timer.textContent : null,
+    };
+  },
+  /** 审批卡是否横向溢出 —— 以**页面级**（#miniBody）为准。
+   *  ⚠ 不能用卡级 scrollWidth：卡内 <pre>{overflow:auto} 内部横向滚动会把卡 scrollWidth 撑大，
+   *    但 #miniBody{overflow-x:hidden} 已裁剪，页面并无横滚（误报假阳性）。 */
+  approvalOverflow: () => {
+    const n = $('#miniBody');
+    if (!n) return null;
+    const c = n.querySelector('.approval');
+    if (!c) return null;
+    return {
+      // 页面级判定（真溢出）：小窗主体是否横向滚动
+      scrollWidth: n.scrollWidth,
+      clientWidth: n.clientWidth,
+      overflows: n.scrollWidth > n.clientWidth + 1,
+      // 卡级仅作诊断（内部 <pre> 横向滚动会使其偏高，不代表页面溢出）
+      cardScrollWidth: c.scrollWidth,
+      cardClientWidth: c.clientWidth,
+    };
+  },
+  /** 审批卡计算高度（360×480 不溢出断言用：卡片高 ≤ 容器可视高） */
+  approvalMetrics: () => {
+    const n = $('#miniBody');
+    if (!n) return null;
+    const c = n.querySelector('.approval');
+    if (!c) return null;
+    return {
+      cardHeight: c.getBoundingClientRect().height,
+      bodyClientHeight: n.clientHeight,
+      bodyScrollHeight: n.scrollHeight,
+      bodyScrollWidth: n.scrollWidth,
+      bodyClientWidth: n.clientWidth,
+      // 小窗主体自身不横向溢出（纵向本就允许滚动）
+      bodyOverflowsX: n.scrollWidth > n.clientWidth + 1,
+    };
+  },
+  /** 已过期但仍在 store 里的卡数（验证「到 0 不移除，等 cancel」） */
+  expiredApprovalCount: () => {
+    let n = 0;
+    for (const c of store.approvals.values()) if (approvalExpired(c)) n += 1;
+    return n;
+  },
+  version: '1.0.0',
+};
+
+void boot();
+</script>
+</body>
+</html>
