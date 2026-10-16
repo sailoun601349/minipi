@@ -13,10 +13,48 @@
 ```bash
 # 1) 装依赖（本机 npm 走 npmmirror；Electron 二进制需镜像，见 §8）
 npm install
-
-# 2) 启动 App
-npm start
 ```
+
+### 日常使用：双击 `minipi.cmd`
+
+装完依赖后，**双击仓库根目录的 `minipi.cmd`** 即可 —— 这是**唯一**的双击入口。
+
+启动壳只有三行，逻辑全在 `scripts/launch.mjs`（所以它可以被 `node scripts/launch.mjs` 直接复现和验证）：
+
+```
+minipi.cmd  →  node scripts/launch.mjs  →  detached 拉起 node_modules/electron/dist/electron.exe .
+```
+
+`launch.mjs` 做四件事：建 `~/.minipi/logs` → 解析 electron 二进制 → 清掉
+`ELECTRON_RUN_AS_NODE` → **detach 拉起 Electron 后立刻退出**。退出得快，所以黑框只闪
+一下；Electron 自己活得比它久，stdout/stderr 直接落进 `~/.minipi/logs/launcher.log`
+（超 1 MB 轮转 `.old`）。启动壳退出码非 0 会 `pause`，不会静默失败。
+
+> **启动壳必须保持纯 ASCII + CRLF。** 这里是三次「双击弹出编译错误框」换来的教训：
+> 最早用的 `.vbs` 由工具写成「UTF-8 无 BOM + 中文」，而 WSH 在没有 UTF-16 BOM 时按
+> 系统 ANSI 码页解码，于是中文被当 GBK 解，抛 `800A0409` / `800A0401` —— 一行都没跑到；
+> 改成纯 ASCII 后又踩到 VBScript 的 `800A0414`（`Sub` 配括号 + 多参）。
+> `.cmd` 没有这两类陷阱，`npm run verify:launcher` 里有对应硬门禁。
+
+### 开发调试：`npm start`
+
+```bash
+npm start            # = node scripts/start.mjs
+npm run launch       # 只跑启动壳，不经过 .cmd
+```
+
+`npm start` 走 `scripts/start.mjs`，它会先清 `ELECTRON_RUN_AS_NODE` 再 spawn electron
+（**WorkBuddy / 沙箱终端里该变量会被注入**，带着它跑会让 Electron 退化成纯 Node，
+`import { BrowserWindow } from "electron"` 直接失败）。双击场景没有这个变量，
+`launch.mjs` 里清它只是防御。
+
+> **本机必须关掉 GPU 进程自己的 sandbox**，否则双击就是「闪退」。Electron 主进程能跑到
+> `app.whenReady()`、窗口也建了，但 GPU 子进程反复以 `exit_code=-1073741819`
+> （`0xC0000005`）退出，几轮重试后 Chromium `FATAL ... GPU process isn't usable. Goodbye.`
+> 把整个 App 带走 —— 从启动到消失约 1 秒。实测 `--disable-gpu` / `--in-process-gpu` /
+> `--use-gl=swiftshader` 都救不了；`--no-sandbox` 能起但连带关了渲染进程的 sandbox，
+> 代价过大。最终在 `src/main/index.js` 里注入 `disable-gpu-sandbox`（**保留硬件加速**，
+> 这对透明窗很关键）。要恢复默认行为就设 `MINIPI_KEEP_GPU_SANDBOX=1`。
 
 启动后：
 
@@ -108,6 +146,10 @@ minipi/
 | `prompt` | `{ sessionId, text, behavior? }` | `{ accepted }` |
 | `abort` | `{ sessionId }` | `{ ok }` |
 | `setWindowState` | `{ state }` | `{ ok, bounds }` |
+| `listModels` | — | `{ current, defaultModel, models[] }` |
+| `listProviders` | — | `{ current, defaultModel, featured[], providers[] }`（每个 provider 含 `{ provider, name, baseUrl, configured, authSource, models[{ modelId, name, contextWindow, maxTokens, available }] }`，**不含任何密钥**） |
+| `setModel` | `{ model: { provider, modelId } \| null }` | `{ ok, model, note }` |
+| `setApiKey` | `{ providerId, apiKey }` | `{ ok, persisted, warning? }`（key 只写不读） |
 | `getSettings` | — | `settings` |
 | `setSettings` | `partial` | `settings` |
 | `quit` | — | `void` |
@@ -220,6 +262,63 @@ try {
 - 审批器**只读、绝不改 `event.input`** —— 改参会绕过沙箱与一切校验（vendor 原文：改动后不再重新校验），这是产品级隐患，明确禁止。
 - 「本次会话始终允许」**只免审批、绝不免沙箱**；该开关默认关、只在内存、只有 IPC 显式带 `remember: true` 才开，开启时记审计 `always_allow_enabled`。
 - 推给渲染层的命令与 diff **统一先过 `redactSecrets()`**（`approval.js:208`，全仓唯一实现点；`session.js:sanitizeDetail` 反过来 import 复用），顺序是「路径替换之后、截断之前」。
+
+---
+
+### 5.6 会话显示：思考段 / 工具标记 / 小窗连续性
+
+三件事都在 `src/renderer/index.html`，都由 `npm run verify:thought` + `npm run qa:mini-continuity` 守着。
+
+**① 小窗是连续的会话流，不是「一轮一屏」。** `renderViews()` 的 mini 分支曾经只取
+`store.turns[turns.length - 1]`，用户得打开大窗才发现前面的轮次还在。现在 mini 与 full
+**同构**：都遍历 `store.turns` 全量轮次，只是宽度与「思考段默认折叠状态」不同
+（小窗默认收起、大窗默认展开）。
+
+**② 模型吐出的工具调用标记 → 折叠成提示卡。** `quick` 场景是 `noTools: "all"`，
+模型手里没有工具，却会把 Anthropic 风格的工具调用语法**当正文写出来**：
+
+```text
+<invoke name="cmd"><parameter name="cmd">dir /a</parameter>
+<parameter name="justification">看看目录</parameter></invoke>
+```
+
+已用真实会话 dump 过事件流取证（`pi.on` 订阅 + 逐事件打印）：Pi 只发
+`thinking_*` / `text_*`，**没有 `toolcall_*` 子事件**，`message_end` 的 content 也只有
+`[thinking, text]` —— 也就是说这**不是解析漏了，是模型行为**。既然它不是真的工具调用，
+就不该按工具卡渲染；但也不该让一屏尖括号糊在用户脸上。
+
+所以 `splitToolMarkup()`（`src/shared/protocol.js` §8b）把它识别出来，渲染层折叠成
+`.toolnote` 卡片（工具名 + 各 parameter + 一行「当前场景未启用工具」）。
+边界一律往「宁可原样显示，不要误吞内容」倒：只认 `<invoke name="…">…</invoke>` 这个确切形状
+（`<img>` / `<div>` 一律不碰）；块数 > 20 或单块 > 20000 字就不再识别、剩下的原样当正文。
+
+> 渲染层不能 `import` protocol.js（单文件零依赖），所以那份是**内联镜像**；
+> `verify:thought` 的做法不是比字符串，而是**把镜像源码抽出来真跑一遍同样的用例**，逐例比对输出。
+
+**③ 密钥一律只写不读。** 模型设置里的 API 密钥输入框恒为空、`type=password`，
+保存后立刻清空；主进程也从不把 key 回传上来。
+
+### 5.7 模型设置（提供方卡片）
+
+信息架构对齐 deepseek-harness 的模型页（卡片列表 + 卡内编辑器），数据全部来自 Pi 运行时：
+
+- `ModelRuntime.getProviders()` / `getModels(id)` / `getProviderAuthStatus(id)` →
+  `buildProviderCatalog()`（`src/main/pi/session.js`）→ IPC `listProviders`。
+  回传的是**脱敏目录**：`{ provider, name, baseUrl, configured, authSource, models[] }`，没有 key。
+- **默认只列国内厂商**：`FEATURED_PROVIDER_IDS`（protocol.js）—— deepseek / 智谱 / Kimi /
+  MiniMax / 通义 / 小米 / Ant Ling。其余 30 多个内置厂商折叠进「添加提供方」；
+  任何**已配置密钥**的厂商不论在不在清单里都会展示。渲染层不自己维护这份清单。
+- 圆点只表达「密钥配置状态」：**绿 = 已配置、红 = 缺失**（不是连通性）。
+- **默认模型是 `deepseek/deepseek-flash`**（`DEFAULT_MODEL_PREFERENCE`）。
+  它刻意不写进 `DEFAULT_SETTINGS.model`（那里保持 `null` = 「用默认」），而是在
+  `resolvePreferredModel()` 里兜底 —— 这样 `settings.json` 里 `"model": null` 的老用户
+  立刻拿到新默认，且「默认」与「用户显式选的」在文件里可区分。
+
+  为什么需要兜底：本机 `~/.pi/agent/settings.json` 的 `defaultProvider` 指向一个
+  **根本没注册**的 provider（`cc-switch-zhipu-glm`），Pi 会自己回退到「碰巧排前面的」
+  `deepseek/deepseek-v4-pro` —— 用户看到的默认模型是随机结果，不是我们的选择。
+- 保存时**只提交真正被改过**的模型选项（卡片打开时记下初值），
+  避免「点开卡片随手点保存」就把该提供方的第一个模型设成全局默认。
 
 ---
 

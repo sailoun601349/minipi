@@ -51,7 +51,15 @@ export const SCENE_CWD_DIRS = Object.freeze({
 });
 
 /** 允许写进 settings.json 的顶层键（其余丢弃）。 */
-const ALLOWED_TOP_KEYS = Object.freeze(["version", "sceneId", "noFocusSteal", "window"]);
+const ALLOWED_TOP_KEYS = Object.freeze(["version", "sceneId", "noFocusSteal", "model", "window"]);
+
+function sanitizeModelPreference(value) {
+  if (!isPlainObject(value)) return null;
+  const provider = typeof value.provider === "string" ? value.provider.trim() : "";
+  const modelId = typeof (value.modelId ?? value.id) === "string" ? String(value.modelId ?? value.id).trim() : "";
+  if (!provider || !modelId || provider.length > LIMITS.MODEL_PROVIDER_MAX_CHARS || modelId.length > LIMITS.MODEL_ID_MAX_CHARS) return null;
+  return { provider, modelId };
+}
 
 /**
  * v0.4 场景改名映射（plan §3.2 / §10 D-23）。
@@ -107,6 +115,11 @@ export function normalizeSettings(input, fallback = DEFAULT_SETTINGS) {
   if (isSafeInt(base.version) && base.version > 0) out.version = base.version;
   if (typeof base.sceneId === "string") out.sceneId = migrateSceneId(base.sceneId);
   if (typeof base.noFocusSteal === "boolean") out.noFocusSteal = base.noFocusSteal;
+  if (base.model === null) out.model = null;
+  else {
+    const model = sanitizeModelPreference(base.model);
+    if (model) out.model = model;
+  }
   if (isPlainObject(base.window)) {
     if (typeof base.window.state === "string" && WINDOW_STATE_IDS.includes(base.window.state)) {
       out.window.state = base.window.state;
@@ -133,6 +146,12 @@ export function normalizeSettings(input, fallback = DEFAULT_SETTINGS) {
   }
 
   if (typeof input.noFocusSteal === "boolean") out.noFocusSteal = input.noFocusSteal;
+
+  if (input.model === null) out.model = null;
+  else if (input.model !== undefined) {
+    const model = sanitizeModelPreference(input.model);
+    if (model) out.model = model;
+  }
 
   if (isPlainObject(input.window)) {
     if (typeof input.window.state === "string" && WINDOW_STATE_IDS.includes(input.window.state)) {
@@ -245,6 +264,11 @@ export class SettingsStore {
 
     const merged = structuredClone(this._data);
     if (typeof partial.noFocusSteal === "boolean") merged.noFocusSteal = partial.noFocusSteal;
+    if (partial.model === null) merged.model = null;
+    else if (partial.model !== undefined) {
+      const model = sanitizeModelPreference(partial.model);
+      if (model) merged.model = model;
+    }
     if (typeof partial.sceneId === "string") merged.sceneId = partial.sceneId;
     if (isSafeInt(partial.version) && partial.version > 0) merged.version = partial.version;
     if (isPlainObject(partial.window)) {

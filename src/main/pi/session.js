@@ -38,9 +38,13 @@ import {
   SessionManager,
   createAgentSession,
   getAgentDir,
+  readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
 
+import { MinipiCredentialStore } from "./credentials-store.js";
+
 import {
+  DEFAULT_MODEL_PREFERENCE,
   DEFAULT_SCENE_ID,
   ERROR_CODES,
   LIMITS,
@@ -171,12 +175,98 @@ class SessionRecord {
  * 与 Electron 完全解耦（只通过注入的 `emit` 往外发），因此可以在纯 Node 下被测试
  * ——— `scripts/verify-stream.mjs` 就是这么跑的。
  */
+/**
+ * 把一份「模型偏好」解析成 Pi 的 `Model` 对象。
+ * 接受三种形状（历史兼容，不要砍）：
+ *   · `"provider/modelId"` 字符串
+ *   · `{ provider, modelId }`
+ *   · `{ provider, id }`
+ * @param {unknown} pref
+ * @param {(provider: string, modelId: string) => unknown} getModel
+ * @returns {unknown} Model 对象；解析不出来返回 undefined
+ */
+function resolveModelPref(pref, getModel) {
+  if (!pref) return undefined;
+  if (typeof pref === "string") {
+    const [provider, ...rest] = pref.split("/");
+    return rest.length ? getModel(provider, rest.join("/")) : undefined;
+  }
+  const modelId = pref.modelId ?? pref.id;
+  if (typeof pref.provider === "string" && typeof modelId === "string") return getModel(pref.provider, modelId);
+  return undefined;
+}
+
+/**
+ * 解析用户偏好；**偏好缺失/失效时回退到 `DEFAULT_MODEL_PREFERENCE`**。
+ *
+ * 为什么要兜底：本机 `~/.pi/agent/settings.json` 里的 `defaultProvider` 指向一个
+ * **根本没注册**的 provider（`cc-switch-zhipu-glm`），于是 Pi 会自己回退到「碰巧排前面的」
+ * `deepseek/deepseek-v4-pro` —— 用户看到的默认模型是随机的结果，不是我们的选择。
+ * 显式兜底之后，「默认」这件事由 minipi 说了算。
+ *
+ * ⚠ 兜底只对「没选 / 选的东西不存在」生效；用户显式选中的模型永远优先。
+ */
+export function resolvePreferredModel(pref, getModel, fallback = DEFAULT_MODEL_PREFERENCE) {
+  if (typeof getModel !== "function") return undefined;
+  const chosen = resolveModelPref(pref, getModel);
+  if (chosen) return chosen;
+  return resolveModelPref(fallback, getModel);
+}
+
+/**
+ * 一次性取齐设置页要用的模型目录（脱敏：**绝不回传密钥**）。
+ *
+ * 返回形状对齐「提供方卡片」的信息架构：
+ *   `{ provider, name, baseUrl, configured, authSource, models[] }`
+ *
+ * @param {import("@earendil-works/pi-coding-agent").ModelRuntime | undefined} runtime
+ */
+export function buildProviderCatalog(runtime) {
+  const providers = runtime?.getProviders?.() ?? [];
+  const available = new Set((runtime?.getAvailableSnapshot?.() ?? []).map((m) => `${m.provider}/${m.id}`));
+  return providers.slice(0, LIMITS.PROVIDER_LIST_MAX).map((provider) => {
+    const auth = runtime?.getProviderAuthStatus?.(provider.id) ?? { configured: false };
+    const models = (runtime?.getModels?.(provider.id) ?? [])
+      .slice(0, LIMITS.PROVIDER_MODELS_MAX)
+      .map((model) => ({
+        modelId: model.id,
+        name: model.name || model.id,
+        contextWindow: Number.isFinite(model.contextWindow) ? model.contextWindow : null,
+        maxTokens: Number.isFinite(model.maxTokens) ? model.maxTokens : null,
+        available: available.has(`${provider.id}/${model.id}`),
+      }));
+    return {
+      provider: provider.id,
+      name: provider.name || provider.id,
+      baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : null,
+      configured: auth.configured === true,
+      authSource: typeof auth.source === "string" ? auth.source : null,
+      models,
+    };
+  });
+}
+
+export function buildModelCatalog(runtime) {
+  const available = new Set((runtime?.getAvailableSnapshot?.() ?? []).map((model) => `${model.provider}/${model.id}`));
+  return (runtime?.getModels?.() ?? []).map((model) => {
+    const auth = runtime?.getProviderAuthStatus?.(model.provider) ?? { configured: false };
+    return {
+      provider: model.provider,
+      modelId: model.id,
+      name: model.name || model.id,
+      available: available.has(`${model.provider}/${model.id}`),
+      needsAuth: auth.configured !== true,
+    };
+  });
+}
+
 export class PiSessionHost {
   /**
    * @param {object} [options]
    * @param {(wrapped: {seq:number,sessionId:string,ts:number,event:unknown}) => void} [options.emit]
    * @param {{info?:Function,warn?:Function,error?:Function}} [options.logger]
    * @param {number} [options.eventLogMax]
+   * @param {() => (string|object|undefined)} [options.modelPreference]
    * @param {{request:Function,cancelBySession:Function}} [options.approval]
    *        M4 审批闸门（`ApprovalGate`，由 `main/index.js` 构造注入）。
    *        ⚠ 注入而非 import —— `session.js` 只 import SDK，**不替 approval 做 electron 的事**
@@ -188,11 +278,14 @@ export class PiSessionHost {
     this._eventLogMax = Number.isFinite(options.eventLogMax) ? options.eventLogMax : LIMITS.EVENT_LOG_MAX;
     /** @type {{request:Function,cancelBySession:Function}|null} */
     this._approval = options.approval ?? null;
+    this._modelPreference = typeof options.modelPreference === "function" ? options.modelPreference : () => undefined;
 
     /** @type {Map<string, SessionRecord>} */
     this._records = new Map();
     /** @type {import("@earendil-works/pi-coding-agent").ModelRuntime | null} */
     this._modelRuntime = null;
+    /** @type {MinipiCredentialStore | null} */
+    this._credentialStore = null;
     /** @type {Promise<unknown> | null} */
     this._initPromise = null;
     this._sessionCounter = 0;
@@ -218,7 +311,10 @@ export class PiSessionHost {
     if (this._modelRuntime) return this._modelRuntime;
     if (!this._initPromise) {
       this._initPromise = (async () => {
-        const rt = await ModelRuntime.create();
+        const fallbackRead = typeof readStoredCredential === "function" ? (providerId) => readStoredCredential(providerId) : undefined;
+        const credentials = new MinipiCredentialStore({ fallbackRead });
+        this._credentialStore = credentials;
+        const rt = await ModelRuntime.create({ credentials });
         this._modelRuntime = rt;
         return rt;
       })();
@@ -239,6 +335,38 @@ export class PiSessionHost {
   /** 已登记的会话 id 列表。 */
   listSessionIds() {
     return [...this._records.keys()];
+  }
+
+  async listModels() {
+    await this.init();
+    return buildModelCatalog(this._modelRuntime);
+  }
+
+  /**
+   * 模型设置页用的**提供方目录**（每个提供方带自己的模型清单 + 密钥状态）。
+   * 只回传脱敏信息：没有 key、没有 token、没有 headers。
+   */
+  async listProviders() {
+    await this.init();
+    return buildProviderCatalog(this._modelRuntime);
+  }
+
+  async setModelApiKey(input) {
+    await this.init();
+    const providerId = input?.providerId;
+    const apiKey = input?.apiKey;
+    if (typeof providerId !== "string" || typeof apiKey !== "string" || apiKey.length === 0) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "providerId 和 apiKey 必须有效"));
+    }
+    await this._credentialStore.modify(providerId, async () => ({ type: "api_key", key: apiKey }));
+    try {
+      await this._modelRuntime.setRuntimeApiKey(providerId, apiKey);
+    } catch (err) {
+      // 凭证已持久化；模型运行时同步失败时仍报告可重试的警示。
+      this._logger.warn?.(`[minipi:pi] provider ${providerId} key 已保存，但运行时同步失败：${sanitizeDetail(err)}`);
+      return { ok: true, persisted: true, warning: "运行时同步失败，下次会话将重试" };
+    }
+    return { ok: true, persisted: true };
   }
 
   /** 某个会话是否存在。 */
@@ -287,11 +415,13 @@ export class PiSessionHost {
           SessionManager.create(cwd);
 
     const resourceLoader = await this._buildResourceLoader(scene, sessionId, cwd);
+    const preferredModel = resolvePreferredModel(this._modelPreference(), (provider, id) => this._modelRuntime.getModel(provider, id));
 
     let created;
     try {
       created = await createAgentSession({
         modelRuntime: this._modelRuntime,
+        ...(preferredModel ? { model: preferredModel } : {}),
         cwd,
         sessionManager,
         ...(resourceLoader ? { resourceLoader } : {}),

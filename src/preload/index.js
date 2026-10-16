@@ -132,6 +132,16 @@ const minipi = Object.freeze({
   /** @param {{ limit?: number }} [arg] → { items: OutcomeSummary[] } */
   listOutcomes: (arg) => call(INVOKE.LIST_OUTCOMES, arg),
 
+  /* -------- 模型配置 -------- */
+  /** → { current, defaultModel, models: [{ provider, modelId, name, available, needsAuth }] } */
+  listModels: () => call(INVOKE.LIST_MODELS),
+  /** → { current, defaultModel, featured: string[], providers: [{ provider, name, baseUrl, configured, authSource, models: [{ modelId, name, contextWindow, maxTokens, available }] }] } */
+  listProviders: () => call(INVOKE.LIST_PROVIDERS),
+  /** @param {{ model: { provider: string, modelId: string } | null }} arg */
+  setModel: (arg) => call(INVOKE.SET_MODEL, arg),
+  /** @param {{ providerId: string, apiKey: string }} arg；key 只透传，不回显 */
+  setApiKey: (arg) => call(INVOKE.SET_API_KEY, arg),
+
   /* -------- M4 审批闸门 -------- */
 
   /** @param {{ approvalId: string, action: "allowOnce"|"deny"|"terminate", remember?: boolean }} arg → { ok: true }

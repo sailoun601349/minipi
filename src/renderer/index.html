@@ -421,6 +421,21 @@ kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); ba
   border-top:1px dashed var(--border); word-break:break-word; overflow-wrap:anywhere; user-select:text;
 }
 
+/* 「模型尝试调用工具 · 当前场景未启用」提示卡（quick 无工具时的兜底显示）。
+   刻意做得比审批卡、工具卡都轻：它没有任何可点的动作，只是把尖括号收起来。 */
+.toolnote{
+  width:100%; margin:7px 0; border:1px solid var(--border); border-left:2px solid #7a6a3d;
+  border-radius:8px; background:rgba(60,50,25,.32); overflow:hidden;
+}
+.toolnote__head{ display:flex; align-items:center; gap:6px; padding:6px 9px; font-size:11px; color:var(--text-2); min-width:0; }
+.toolnote__dot{ flex-shrink:0; width:6px; height:6px; border-radius:50%; background:#d6b463; }
+.toolnote__title{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+.toolnote__tag{ margin-left:auto; flex-shrink:0; font-size:10px; color:var(--muted); border:1px solid var(--border); border-radius:5px; padding:1px 5px; }
+.toolnote__row{ display:flex; gap:7px; align-items:flex-start; padding:4px 9px; border-top:1px dashed var(--border); font-size:11px; }
+.toolnote__k{ flex-shrink:0; min-width:64px; color:var(--muted); font-family:var(--mono); }
+.toolnote__v{ flex:1; min-width:0; color:var(--text-2); font-family:var(--mono); word-break:break-word; overflow-wrap:anywhere; user-select:text; }
+.toolnote__raw{ margin:0; padding:6px 9px; border-top:1px dashed var(--border); font-size:10.5px; color:var(--muted); font-family:var(--mono); white-space:pre-wrap; word-break:break-word; user-select:text; }
+
 /* 工具调用紧凑行（小窗） */
 .tooline{
   display:flex; align-items:center; gap:7px; width:100%; text-align:left; min-width:0;
@@ -602,6 +617,36 @@ kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); ba
 #mockPanel .mp__g{ font-size:10px; font-weight:700; color:var(--muted); letter-spacing:.3px; }
 #mockPanel .mp__hint{ font-size:10px; color:var(--muted); line-height:1.45; word-break:break-word; }
 #mockPanel .btn{ padding:4px 7px; font-size:10.5px; }
+.outcomeComposer{position:fixed;z-index:50;left:50%;bottom:18px;transform:translateX(-50%);width:min(420px,calc(100vw - 24px));padding:14px;background:rgba(18,24,31,.98);border:1px solid #526273;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.55)}
+.outcomeComposer__title{font-weight:700;font-size:13px;margin-bottom:8px}.outcomeComposer__hint{font-size:11px;color:var(--muted);margin-top:5px}
+.outcomeComposer textarea{width:100%;min-height:72px;resize:vertical;background:#10161d;color:var(--text);border:1px solid var(--border);border-radius:7px;padding:8px;font:inherit;font-size:12px}
+.outcomeComposer__formats{display:flex;gap:7px;margin:9px 0}.outcomeComposer__formats .btn[aria-pressed="true"]{border-color:#73a7ff;background:rgba(82,142,255,.22)}
+.outcomeComposer__actions{display:flex;justify-content:flex-end;gap:7px;margin-top:10px}.outcomeComposer__status{font-size:11px;color:var(--warn);min-height:16px;margin-top:5px}
+.settingsPanel{position:fixed;z-index:51;inset:7% 50% auto auto;transform:translateX(50%);width:min(520px,calc(100vw - 24px));max-height:86vh;overflow:auto;padding:16px;background:rgba(18,24,31,.99);border:1px solid #526273;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.6)}
+.settingsPanel select,.settingsPanel input{width:100%;box-sizing:border-box;background:#10161d;color:var(--text);border:1px solid var(--border);border-radius:7px;padding:8px;font:inherit;font-size:12px}.settingsPanel__row{display:flex;gap:8px;align-items:center;margin:8px 0}.settingsPanel__row>*{min-width:0;flex:1}.settingsPanel__close{float:right}.settingsPanel__note{font-size:11px;color:var(--muted);line-height:1.45}.modelList{max-height:190px;overflow:auto;margin-top:8px}.modelItem{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:7px;border-bottom:1px solid rgba(130,150,170,.15);font-size:11px}.modelItem__meta{color:var(--muted)}
+
+/* ---- 模型设置：提供方卡片（对齐 deepseek-harness 的信息架构，配色沿用 minipi） ---- */
+.settingsPanel__h{margin:0 0 6px;font-size:15px;font-weight:600}
+.settingsPanel__intro{margin:0 0 10px;font-size:11.5px;color:var(--muted);line-height:1.6}
+.settingsPanel__current{padding:8px 10px;border:1px solid var(--border);border-radius:9px;background:var(--surface-2);font-size:11.5px;color:var(--text-2);line-height:1.55}
+.provList{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.provCard{border:1px solid var(--border);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:rgba(255,255,255,.015)}
+.provCard__head{display:flex;align-items:center;gap:8px;min-width:0}
+.provCard__name{font-size:13px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.provCard__tag{flex-shrink:0;font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:0 5px;line-height:15px}
+.provDot{flex-shrink:0;width:8px;height:8px;border-radius:50%}
+.provDot--on{background:#3fbf6f}
+.provDot--off{background:#c9603f}
+.provCard__edit{margin-left:auto;flex-shrink:0}
+.provCard__meta{font-size:11px;color:var(--muted);line-height:1.55;word-break:break-word}
+.provCard__editor{display:flex;flex-direction:column;gap:9px;border-top:1px dashed var(--border);padding-top:9px}
+.provField{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--muted);min-width:0}
+.provField select,.provField input{width:100%}
+.provCard__hint{font-size:10.5px;color:var(--muted);line-height:1.5}
+.provCard__actions{display:flex;justify-content:flex-end;gap:6px}
+.provAdd{margin-top:10px}
+.provAdd__toggle{width:100%;height:38px;border:1px dashed var(--border-strong);border-radius:12px}
+.provMore{margin-top:8px}
 </style>
 </head>
 <body data-mode="ball">
@@ -661,6 +706,7 @@ kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); ba
           <span class="chip chip--warn" id="queueChip" hidden aria-live="polite"></span>
         </div>
         <div class="mini__footrow">
+          <button class="btn btn--ghost btn--sm" type="button" id="btnOutcome" title="将本轮内容整理为 Markdown 或 Word 文档">产出</button>
           <button class="btn btn--danger btn--sm" type="button" id="btnAbort" disabled>中断</button>
           <button class="btn btn--primary btn--sm" type="button" id="btnSend">发送</button>
         </div>
@@ -702,8 +748,14 @@ kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); ba
 
         <aside class="full__col full__col--side" aria-label="会话信息">
           <div class="sideblock">
-            <div class="sideblock__h">模型 <span class="tag">只读</span></div>
-            <div class="readonlyline" id="fullModel" title="契约里没有「切换模型」接口，本期只读">—</div>
+            <div class="sideblock__h">模型 <span class="tag">当前会话</span></div>
+            <div class="readonlyline" id="fullModel" title="当前会话模型">—</div>
+            <button class="btn btn--ghost btn--sm btn--block" type="button" id="btnSettings">模型设置</button>
+          </div>
+          <div class="sideblock">
+            <div class="sideblock__h">文件产出</div>
+            <button class="btn btn--primary btn--sm btn--block" type="button" id="btnOutcomeFull">整理本轮为文档</button>
+            <p class="mini__note" style="margin-top:6px">可导出 Markdown 或 Word（.docx）</p>
           </div>
           <div class="sideblock">
             <div class="sideblock__h">场景（切换会新建会话）</div>
@@ -737,6 +789,31 @@ kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); ba
       </div>
     </section>
   </div>
+  <section class="outcomeComposer" id="outcomeComposer" hidden aria-label="生成文档">
+    <div class="outcomeComposer__title">把这轮回答整理成文档</div>
+    <textarea id="outcomeIntent" maxlength="2000" placeholder="例如：整理成一份会议纪要或学习笔记"></textarea>
+    <div class="outcomeComposer__formats" role="group" aria-label="文档格式">
+      <button class="btn btn--sm" type="button" data-outcome-format="docx" aria-pressed="true">Word (.docx)</button>
+      <button class="btn btn--sm" type="button" data-outcome-format="md" aria-pressed="false">Markdown (.md)</button>
+    </div>
+    <div class="outcomeComposer__status" id="outcomeComposerStatus" aria-live="polite"></div>
+    <div class="outcomeComposer__actions">
+      <button class="btn btn--ghost btn--sm" type="button" id="btnOutcomeCancel">取消</button>
+      <button class="btn btn--primary btn--sm" type="button" id="btnOutcomeGenerate">生成文档</button>
+    </div>
+  </section>
+  <section class="settingsPanel" id="settingsPanel" hidden aria-label="模型设置">
+    <button class="btn btn--ghost btn--sm settingsPanel__close" type="button" id="btnSettingsClose">关闭</button>
+    <h3 class="settingsPanel__h">模型</h3>
+    <p class="settingsPanel__intro">填入各提供方的 API 密钥即可使用其模型。模型选择只对新建会话生效，当前会话不会被重建。</p>
+    <div class="settingsPanel__current" id="modelCurrent">正在读取模型目录…</div>
+    <ul class="provList" id="provList"></ul>
+    <div class="provAdd">
+      <button class="btn btn--ghost provAdd__toggle" type="button" id="btnProvAdd">+ 添加提供方</button>
+    </div>
+    <ul class="provList" id="provMore" hidden></ul>
+    <div class="settingsPanel__note" id="settingsStatus" aria-live="polite"></div>
+  </section>
 </div>
 
 <!-- mock 模式控制台（无 window.minipi 时显示；方便单独验收 UI） -->
@@ -890,6 +967,72 @@ const APPROVAL_KIND_LABEL = Object.freeze({
   command: '执行命令',
 });
 
+/* ---- 工具调用标记识别（逐字对齐 protocol.js 的 splitToolMarkup / LIMITS，见 §8b） ----
+   ⚠ 为什么要有这份镜像：`quick` 场景 `noTools: "all"`，模型手里没有工具，却会把
+     Anthropic 风格的工具调用语法**当正文写出来**（`<invoke name="cmd"><parameter …>`）。
+     已用真实事件流取证：Pi 不发 `toolcall_*`，最终 content 只有 `[thinking, text]`，
+     所以这不是解析漏了，是模型行为。识别出来折叠成提示卡，别让一屏尖括号糊脸。
+   ⚠ 改 protocol.js 那份时必须同步改这里（`npm run verify:thought` 有漂移门禁）。 */
+const TOOL_INVOKE_MAX_BLOCKS = 20;
+const TOOL_INVOKE_MAX_CHARS = 20000;
+const TOOL_PARAM_MAX_ITEMS = 8;
+const TOOL_PARAM_MAX_CHARS = 2000;
+
+/** @type {(text: unknown) => Array<{kind:'text',text:string}|{kind:'tool',name:string,raw:string,params:Array<{name:string,value:string}>}>} */
+function splitToolMarkup(text) {
+  const src = typeof text === 'string' ? text : '';
+  if (src.length === 0) return [];
+  if (!/<invoke\s+name\s*=/i.test(src)) return [{ kind: 'text', text: src }];
+
+  const parts = [];
+  const re = /<invoke\s+name\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\/invoke\s*>/gi;
+  let cursor = 0;
+  let blocks = 0;
+  let match = re.exec(src);
+
+  while (match !== null) {
+    if (blocks >= TOOL_INVOKE_MAX_BLOCKS) break;
+    const raw = match[0];
+    if (raw.length > TOOL_INVOKE_MAX_CHARS) break;
+
+    if (match.index > cursor) parts.push({ kind: 'text', text: src.slice(cursor, match.index) });
+    parts.push({
+      kind: 'tool',
+      name: String(match[1] ?? '').slice(0, 64),
+      raw,
+      params: parseToolParams(match[2]),
+    });
+    cursor = match.index + raw.length;
+    blocks += 1;
+    match = re.exec(src);
+  }
+
+  if (cursor === 0) return [{ kind: 'text', text: src }];
+  if (cursor < src.length) parts.push({ kind: 'text', text: src.slice(cursor) });
+  return parts;
+}
+
+function parseToolParams(body) {
+  const out = [];
+  const src = typeof body === 'string' ? body : '';
+  const re = /<parameter\s+name\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\/parameter\s*>/gi;
+  let match = re.exec(src);
+  while (match !== null) {
+    if (out.length >= TOOL_PARAM_MAX_ITEMS) break;
+    out.push({
+      name: String(match[1] ?? '').slice(0, 64),
+      value: String(match[2] ?? '').trim().slice(0, TOOL_PARAM_MAX_CHARS),
+    });
+    match = re.exec(src);
+  }
+  return out;
+}
+
+function hasToolMarkup(text) {
+  if (typeof text !== 'string' || text.length === 0) return false;
+  return /<\/invoke\s*>/i.test(text) && /<invoke\s+name\s*=/i.test(text);
+}
+
 const ERROR_CODES = Object.freeze({
   INVALID_ARGUMENT: 'INVALID_ARGUMENT',
   SESSION_NOT_FOUND: 'SESSION_NOT_FOUND',
@@ -905,6 +1048,7 @@ const ERROR_CODES = Object.freeze({
   OUTCOME_NOT_FOUND: 'OUTCOME_NOT_FOUND',
   /* 沙箱拦截（v0.4，protocol.js 同步）—— 缺了它会被 parseErrorMessage 降级成 INTERNAL，错误归类错 */
   SANDBOX_DENIED: 'SANDBOX_DENIED',
+  MODEL_NOT_FOUND: 'MODEL_NOT_FOUND',
   /* M4 审批闸门（审批设计 §9.1 / §5；protocol.js 同步）—— 同理会降级成 INTERNAL，必须镜像 */
   APPROVAL_TIMEOUT: 'APPROVAL_TIMEOUT',
   APPROVAL_DENIED: 'APPROVAL_DENIED',
@@ -2124,6 +2268,60 @@ function buildTurnNode(turn, view, refsMap) {
   return wrap;
 }
 
+/** 提示卡里单个参数值的最长展示字符数（再长就截断，避免一条命令撑破小窗）。 */
+const TOOLNOTE_VALUE_MAX_CHARS = 300;
+
+/**
+ * 「模型尝试调用工具 · 当前场景未启用」提示卡。
+ *
+ * 只在**没有真工具**的场景可能出现（`quick`）。界面上它与审批卡、工具卡都不同：
+ * 它不提供任何按钮 —— 因为**根本没有可执行的东西**，只是告诉用户
+ * 「模型想调工具，但这个场景不给它工具」。
+ *
+ * 安全：所有值走 `textContent`；原文只以纯文本呈现，绝不拼进 innerHTML。
+ */
+function buildToolNoteCard(part) {
+  const box = el('div', 'toolnote');
+  const head = el('div', 'toolnote__head');
+  head.appendChild(el('span', 'toolnote__dot'));
+  const name = part.name || '未命名';
+  head.appendChild(el('span', 'toolnote__title', `模型尝试调用工具 ${name}`));
+  head.appendChild(el('span', 'toolnote__tag', '当前场景未启用工具'));
+  box.appendChild(head);
+
+  if (part.params.length === 0) {
+    const pre = el('pre', 'toolnote__raw');
+    pre.textContent = part.raw.slice(0, TOOLNOTE_VALUE_MAX_CHARS);
+    box.appendChild(pre);
+    return box;
+  }
+  for (const p of part.params) {
+    const row = el('div', 'toolnote__row');
+    row.appendChild(el('span', 'toolnote__k', p.name));
+    const v = el('code', 'toolnote__v');
+    v.textContent =
+      p.value.length > TOOLNOTE_VALUE_MAX_CHARS ? `${p.value.slice(0, TOOLNOTE_VALUE_MAX_CHARS)}…` : p.value;
+    row.appendChild(v);
+    box.appendChild(row);
+  }
+  return box;
+}
+
+/**
+ * 把一段文本渲染成「散文（markdown）+ 工具标记提示卡」。
+ *
+ * 没有工具标记时它**严格等价于** `renderMarkdown(text)` —— 这是刻意的：
+ * 存量渲染路径（含 XSS 回归）不因为这次改动而变行为。
+ */
+function renderRichParts(text) {
+  const frag = document.createDocumentFragment();
+  for (const part of splitToolMarkup(text)) {
+    if (part.kind === 'tool') frag.appendChild(buildToolNoteCard(part));
+    else frag.appendChild(renderMarkdown(part.text));
+  }
+  return frag;
+}
+
 function buildThink(seg, view, refsMap) {
   const openMap = store.fold[view];
   // 折叠状态存在 store 里（重渲染不丢）；默认值按视图不同：
@@ -2141,12 +2339,19 @@ function buildThink(seg, view, refsMap) {
   box.appendChild(head);
   if (open) {
     const body = el('div', 'thinkbox__body');
-    const span = el('span');
-    const tn = document.createTextNode(seg.text);
-    span.appendChild(tn);
-    body.appendChild(span);
+    if (seg.finalized) {
+      // 收尾后走「散文 + 提示卡」；没收尾时保持 textNode 增量路径
+      // （否则 `flushViews()` 的 appendData 快路径失效，流式会卡住）。
+      body.appendChild(renderRichParts(seg.text));
+      refsMap.set(seg.id, { textNode: null, len: seg.text.length });
+    } else {
+      const span = el('span');
+      const tn = document.createTextNode(seg.text);
+      span.appendChild(tn);
+      body.appendChild(span);
+      refsMap.set(seg.id, { textNode: tn, len: seg.text.length });
+    }
     box.appendChild(body);
-    refsMap.set(seg.id, { textNode: tn, len: seg.text.length });
   }
   return box;
 }
@@ -2154,7 +2359,7 @@ function buildThink(seg, view, refsMap) {
 function buildText(seg, refsMap) {
   if (seg.finalized) {
     const holder = el('div');
-    holder.appendChild(renderMarkdown(seg.text));
+    holder.appendChild(renderRichParts(seg.text));
     refsMap.set(seg.id, { textNode: null, len: seg.text.length });
     return holder;
   }
@@ -2550,7 +2755,10 @@ function renderViews() {
   const miniBody = $('#miniBody');
   const fullTree = $('#fullTree');
 
-  /* --- 小窗：只渲染「当前这一轮」 --- */
+  /* --- 小窗：**整段会话流**（与大窗同构，只是宽度与折叠默认值不同） ---
+     ⚠ 曾经这里只渲染 `store.turns[turns.length - 1]`（「一轮一屏」），
+       用户反馈「小窗像一次性的、打开大窗才发现是连续的」。
+       现在两边都遍历全量轮次，小窗靠自身的滚动条连续往下看。 */
   const nearMini = miniBody.scrollHeight - miniBody.scrollTop - miniBody.clientHeight < 80;
   const miniRefs = new Map();
   miniBody.textContent = '';
@@ -2561,15 +2769,17 @@ function renderViews() {
   } else if (store.turns.length === 0) {
     miniBody.appendChild(buildEmpty());
   } else {
-    const turn = store.turns[store.turns.length - 1];
-    for (const seg of turn.segments) {
-      if (seg.kind === 'user') {
-        const m = el('div', 'msg msg--user');
-        m.appendChild(el('div', 'bubble', seg.text));
-        miniBody.appendChild(m);
+    store.turns.forEach((turn, idx) => {
+      if (idx > 0) miniBody.appendChild(el('div', 'turndivider', `第 ${idx + 1} 轮`));
+      for (const seg of turn.segments) {
+        if (seg.kind === 'user') {
+          const m = el('div', 'msg msg--user');
+          m.appendChild(el('div', 'bubble', seg.text));
+          miniBody.appendChild(m);
+        }
       }
-    }
-    miniBody.appendChild(buildTurnNode(turn, 'mini', miniRefs));
+      miniBody.appendChild(buildTurnNode(turn, 'mini', miniRefs));
+    });
     if (store.autoRetry) miniBody.appendChild(el('p', 'mini__note', store.autoRetry));
   }
   // 审批卡：不挂在轮次上，追加在对话流之后（即便还没有任何轮次也要能显示）
@@ -2648,6 +2858,7 @@ function renderChrome() {
   else { q.hidden = true; q.textContent = ''; }
 
   $('#btnAbort').disabled = !store.streaming || !store.session;
+  updateOutcomeComposerState();
 
   /* 审批横幅：有未决审批时显示，文案带条数 */
   const banner = $('#miniBanner');
@@ -2824,6 +3035,316 @@ function goState(state) {
   });
 }
 
+function latestUserText() {
+  for (let i = store.turns.length - 1; i >= 0; i -= 1) {
+    const user = store.turns[i].segments.find((s) => s.kind === 'user');
+    if (user && typeof user.text === 'string' && user.text.trim()) return user.text.trim().slice(0, 2000);
+  }
+  return '';
+}
+
+function updateOutcomeComposerState() {
+  const status = $('#outcomeComposerStatus');
+  const generate = $('#btnOutcomeGenerate');
+  if (!status || !generate) return;
+  if (!store.session || store.conn !== 'ready') {
+    status.textContent = '还没有可用会话，请先发送一句话。';
+    generate.disabled = true;
+  } else if (store.streaming) {
+    status.textContent = 'Pi 正在回答，请等本轮结束后再产出。';
+    generate.disabled = true;
+  } else {
+    status.textContent = '';
+    generate.disabled = false;
+  }
+}
+
+function openOutcomeComposer() {
+  const panel = $('#outcomeComposer');
+  const intent = $('#outcomeIntent');
+  if (!panel || !intent) return;
+  if (!intent.value.trim()) intent.value = latestUserText();
+  panel.hidden = false;
+  updateOutcomeComposerState();
+  try { intent.focus(); } catch { /* ignore */ }
+}
+
+function closeOutcomeComposer() {
+  const panel = $('#outcomeComposer');
+  if (panel) panel.hidden = true;
+  const status = $('#outcomeComposerStatus');
+  if (status) status.textContent = '';
+}
+
+async function generateOutcomeFromComposer() {
+  const intentEl = $('#outcomeIntent');
+  const button = $('#btnOutcomeGenerate');
+  const intent = intentEl ? intentEl.value.trim().slice(0, 2000) : '';
+  const format = document.querySelector('[data-outcome-format][aria-pressed="true"]')?.getAttribute('data-outcome-format') || 'docx';
+  if (!store.session) { updateOutcomeComposerState(); return; }
+  if (!intent) { toast('请先写下想整理成什么文档', 'warn'); intentEl?.focus(); return; }
+  if (!host || typeof host.generateOutcome !== 'function') { toast('当前宿主不支持文档产出', 'err'); return; }
+  if (button) { button.disabled = true; button.textContent = '正在整理…'; }
+  try {
+    await host.generateOutcome({ sessionId: store.session.sessionId, intent, format });
+    closeOutcomeComposer();
+  } catch (err) {
+    const parsed = parseErrorMessage(err);
+    toast(`生成失败：${parsed.detail}`, 'err');
+    updateOutcomeComposerState();
+  } finally {
+    if (button) button.textContent = '生成文档';
+    updateOutcomeComposerState();
+  }
+}
+
+/* ==========================================================================
+ * 模型设置（提供方卡片，对齐 deepseek-harness 的信息架构）
+ *
+ * 三条设计约束：
+ *   ① **不自己维护厂商清单** —— 默认展示哪些由主进程回传的 `featured` 决定
+ *      （源头是 protocol.js 的 `FEATURED_PROVIDER_IDS`），渲染层只做「featured 排前、
+ *      其余折叠进『添加提供方』」，避免两个地方各写一份国内厂商名单。
+ *   ② **密钥只写不读** —— 输入框永远是空的，placeholder 只说明「已配置 / 未配置」。
+ *      任何情况下都不把 key 回显到 DOM（主进程也不会把 key 回传上来）。
+ *   ③ **全部走 DOM API**（`el()` + `textContent`），不拼 innerHTML —— 厂商名、模型名
+ *      都来自 Pi 运行时的外部数据，不该进 HTML 解析器。
+ * ========================================================================== */
+
+/** 面板数据缓存；`openEditors` 记录哪些卡片当前展开着编辑器（重渲染不丢）。 */
+const modelPanel = {
+  providers: [],
+  current: null,
+  defaultModel: null,
+  openEditors: new Set(),
+  showMore: false,
+};
+
+/** 当前生效的模型：显式偏好优先，否则就是默认。 */
+function effectiveModel() {
+  return modelPanel.current || modelPanel.defaultModel || null;
+}
+
+/** 提供方展示名（运行时没给 name 就退回 provider id）。 */
+function p_display(row) {
+  if (!row) return '';
+  if (typeof row.name === 'string' && row.name.length > 0) return row.name;
+  return typeof row.provider === 'string' ? row.provider : '';
+}
+
+/** 文案用的模型名：先在所属提供方的模型清单里找 name，找不到就用 id。 */
+function modelLabel(pref) {
+  if (!pref || typeof pref.provider !== 'string') return '';
+  const row = modelPanel.providers.find((p) => p.provider === pref.provider);
+  const model = row && Array.isArray(row.models) ? row.models.find((m) => m.modelId === pref.modelId) : null;
+  return `${row ? p_display(row) : pref.provider} / ${(model && model.name) || pref.modelId}`;
+}
+
+/** 卡片第二行的小字：配置状态 + 是否是当前模型。 */
+function providerMetaText(p) {
+  const parts = [p.configured ? 'API 密钥已配置' : '未配置 API 密钥'];
+  if (p.provider === 'deepseek' && !p.configured) parts.push('DeepSeek 需要密钥');
+  const inUse = effectiveModel() && effectiveModel().provider === p.provider;
+  if (inUse) parts.push(`当前模型：${modelLabel(effectiveModel())}`);
+  const count = Array.isArray(p.models) ? p.models.length : 0;
+  if (count > 0) parts.push(`${count} 个模型`);
+  return parts.join(' · ');
+}
+
+/** 一张提供方卡片。 */
+function buildProviderCard(p) {
+  const card = el('li', 'provCard');
+  card.setAttribute('data-provider', String(p.provider || ''));
+
+  const head = el('div', 'provCard__head');
+  head.appendChild(el('span', 'provCard__name', p_display(p)));
+  head.appendChild(el('span', 'provCard__tag', p.provider));
+  const dot = el('span', p.configured ? 'provDot provDot--on' : 'provDot provDot--off');
+  dot.title = p.configured ? 'API 密钥已配置' : 'API 密钥缺失';
+  dot.setAttribute('role', 'img');
+  dot.setAttribute('aria-label', dot.title);
+  head.appendChild(dot);
+  const edit = el('button', 'btn btn--ghost btn--sm provCard__edit', modelPanel.openEditors.has(p.provider) ? '收起' : '编辑');
+  edit.type = 'button';
+  edit.setAttribute('data-prov-edit', String(p.provider));
+  head.appendChild(edit);
+  card.appendChild(head);
+
+  card.appendChild(el('div', 'provCard__meta', providerMetaText(p)));
+
+  if (!modelPanel.openEditors.has(p.provider)) return card;
+
+  const editor = el('div', 'provCard__editor');
+
+  const keyField = el('label', 'provField');
+  keyField.appendChild(el('span', null, p.configured ? 'API 密钥（已配置，填入可覆盖）' : 'API 密钥'));
+  const keyInput = el('input');
+  keyInput.type = 'password';
+  keyInput.autocomplete = 'off';
+  keyInput.placeholder = p.configured ? '留空则保持不变' : '粘贴 API 密钥';
+  keyInput.setAttribute('data-prov-key', String(p.provider));
+  keyField.appendChild(keyInput);
+  editor.appendChild(keyField);
+
+  if (Array.isArray(p.models) && p.models.length > 0) {
+    const modelField = el('label', 'provField');
+    modelField.appendChild(el('span', null, '模型'));
+    const select = el('select');
+    select.setAttribute('data-prov-model', String(p.provider));
+    const cur = effectiveModel();
+    for (const m of p.models) {
+      const opt = el('option', null, m.name || m.modelId);
+      opt.value = m.modelId;
+      if (cur && cur.provider === p.provider && cur.modelId === m.modelId) opt.selected = true;
+      select.appendChild(opt);
+    }
+    // 记住「打开时的初值」——保存时只提交**真正被改过**的选项，
+    // 免得「点开卡片随手点保存」就把这个提供方的第一个模型设成全局默认。
+    select.setAttribute('data-prov-initial', String(select.value || ''));
+    modelField.appendChild(select);
+    editor.appendChild(modelField);
+  } else {
+    editor.appendChild(el('div', 'provCard__hint', '该提供方没有内置模型目录，填入密钥后可用的模型由服务端决定。'));
+  }
+
+  editor.appendChild(
+    el(
+      'div',
+      'provCard__hint',
+      p.configured
+        ? '密钥保存在 ~/.minipi/credentials.json，不会回显、不会写进日志。'
+        : '还没配密钥：填上密钥才能用这个提供方的模型。密钥只写不读。',
+    ),
+  );
+
+  const actions = el('div', 'provCard__actions');
+  const cancel = el('button', 'btn btn--sm', '取消');
+  cancel.type = 'button';
+  cancel.setAttribute('data-prov-cancel', String(p.provider));
+  const save = el('button', 'btn btn--primary btn--sm', '保存');
+  save.type = 'button';
+  save.setAttribute('data-prov-save', String(p.provider));
+  actions.appendChild(cancel);
+  actions.appendChild(save);
+  editor.appendChild(actions);
+  card.appendChild(editor);
+  return card;
+}
+
+/** 重绘提供方列表（featured 全列 + 其余折叠）。 */
+function renderProviderList() {
+  const list = $('#provList');
+  const more = $('#provMore');
+  if (!list) return;
+
+  const all = modelPanel.providers;
+  const featured = all.filter((p) => p.featured || p.configured);
+  const rest = all.filter((p) => !p.featured && !p.configured);
+
+  list.textContent = '';
+  for (const p of featured) list.appendChild(buildProviderCard(p));
+
+  if (more) {
+    more.hidden = !modelPanel.showMore;
+    more.textContent = '';
+    if (modelPanel.showMore) for (const p of rest) more.appendChild(buildProviderCard(p));
+  }
+  const addBtn = $('#btnProvAdd');
+  if (addBtn) {
+    addBtn.textContent = modelPanel.showMore ? '收起其他提供方' : `+ 添加提供方（${rest.length}）`;
+    addBtn.disabled = rest.length === 0;
+  }
+}
+
+/** 顶部「当前模型」一行。 */
+function renderModelCurrent() {
+  const box = $('#modelCurrent');
+  if (!box) return;
+  box.textContent = '';
+  const cur = effectiveModel();
+  if (!cur) {
+    box.appendChild(el('span', null, '尚未选择模型。'));
+    return;
+  }
+  const explicit = modelPanel.current !== null && modelPanel.current !== undefined;
+  box.appendChild(el('strong', null, '当前模型：'));
+  box.appendChild(el('span', null, ` ${modelLabel(cur)}`));
+  box.appendChild(el('span', null, explicit ? '（你选的，新会话生效）' : '（默认）'));
+}
+
+/** 拉一次提供方目录并重绘。 */
+async function loadModelPanel() {
+  const status = $('#settingsStatus');
+  if (status) status.textContent = '正在读取提供方目录…';
+  const result = await host.listProviders();
+  const providers = Array.isArray(result?.providers) ? result.providers : [];
+  const featuredIds = Array.isArray(result?.featured) ? result.featured : [];
+  modelPanel.current = result?.current ?? null;
+  modelPanel.defaultModel = result?.defaultModel ?? null;
+  modelPanel.providers = providers.map((p) => ({ ...p, featured: featuredIds.includes(p.provider) }));
+  renderModelCurrent();
+  renderProviderList();
+  if (status) {
+    status.textContent = providers.length
+      ? '密钥保存在 ~/.minipi/credentials.json（不回显）。模型偏好对下一个新会话生效。'
+      : '没读到任何提供方：请确认 Pi 的 auth.json 存在且可用。';
+  }
+}
+
+async function openSettingsPanel() {
+  const panel = $('#settingsPanel');
+  if (!panel) return;
+  panel.hidden = false;
+  modelPanel.showMore = false;
+  modelPanel.openEditors.clear();
+  try {
+    await loadModelPanel();
+  } catch (err) {
+    const status = $('#settingsStatus');
+    if (status) status.textContent = `读取提供方失败：${parseErrorMessage(err).detail}`;
+  }
+}
+
+/** 保存一张卡片：有 key 就存 key，模型**确实被改过**才存偏好；两者可单独生效。 */
+async function saveProviderCard(providerId) {
+  const card = document.querySelector(`.provCard[data-provider="${providerId}"]`);
+  if (!card) return;
+  const keyInput = card.querySelector('[data-prov-key]');
+  const modelSelect = card.querySelector('[data-prov-model]');
+  const apiKey = keyInput ? keyInput.value : '';
+  const initial = modelSelect ? String(modelSelect.getAttribute('data-prov-initial') || '') : '';
+  const picked = modelSelect ? String(modelSelect.value || '') : '';
+  const modelChanged = Boolean(modelSelect) && picked !== '' && picked !== initial;
+  if (!apiKey && !modelChanged) {
+    toast('没有要保存的内容', 'warn');
+    return;
+  }
+  const done = [];
+  try {
+    if (apiKey) {
+      await host.setApiKey({ providerId, apiKey });
+      if (keyInput) keyInput.value = '';
+      done.push('API 密钥');
+    }
+    if (modelChanged) {
+      await host.setModel({ model: { provider: providerId, modelId: picked } });
+      done.push(`模型 ${picked}`);
+    }
+  } catch (err) {
+    if (keyInput) keyInput.value = '';
+    toast(`保存失败：${parseErrorMessage(err).detail}`, 'err');
+    return;
+  }
+  toast(`已保存 ${done.join(' · ')}`);
+  modelPanel.openEditors.delete(providerId);
+  try {
+    await loadModelPanel();
+  } catch (err) {
+    const status = $('#settingsStatus');
+    if (status) status.textContent = `刷新提供方失败：${parseErrorMessage(err).detail}`;
+  }
+}
+
 function openMenu() {
   const menu = $('#ballMenu');
   menu.hidden = false;
@@ -2868,6 +3389,34 @@ function bindStatic() {
     toast('已收起为小窗 · 流不中断');
   });
   $('#btnMiniCollapse').addEventListener('click', () => goState('ball'));
+
+  /* ---- 产出入口 ---- */
+  $('#btnOutcome').addEventListener('click', openOutcomeComposer);
+  $('#btnOutcomeFull').addEventListener('click', openOutcomeComposer);
+  $('#btnOutcomeCancel').addEventListener('click', closeOutcomeComposer);
+  $('#btnOutcomeGenerate').addEventListener('click', () => { void generateOutcomeFromComposer(); });
+  $('#btnSettings').addEventListener('click', () => { void openSettingsPanel(); });
+  $('#btnSettingsClose').addEventListener('click', () => { $('#settingsPanel').hidden = true; });
+  $('#btnProvAdd').addEventListener('click', () => { modelPanel.showMore = !modelPanel.showMore; renderProviderList(); });
+  // 提供方卡片内部是动态重建的，所以用**事件委托**挂在面板上（只绑一次）。
+  $('#settingsPanel').addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-prov-edit],button[data-prov-cancel],button[data-prov-save]') : null;
+    if (!btn) return;
+    const editId = btn.getAttribute('data-prov-edit');
+    const cancelId = btn.getAttribute('data-prov-cancel');
+    const saveId = btn.getAttribute('data-prov-save');
+    if (editId) {
+      if (modelPanel.openEditors.has(editId)) modelPanel.openEditors.delete(editId);
+      else modelPanel.openEditors.add(editId);
+      renderProviderList();
+      return;
+    }
+    if (cancelId) { modelPanel.openEditors.delete(cancelId); renderProviderList(); return; }
+    if (saveId) { void saveProviderCard(saveId); }
+  });
+  document.querySelectorAll('[data-outcome-format]').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-outcome-format]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  }));
 
   /* ---- 发送 / 中断 ---- */
   $('#btnSend').addEventListener('click', () => { void send(); });
@@ -3603,6 +4152,37 @@ function createMockHost() {
     __approvalCount() { return approvalNo; },
     /** 最近一张未决审批的 id（供「就地更新一张」按钮定位） */
     __lastApprovalId() { return approvalStore.size ? [...approvalStore.keys()][approvalStore.size - 1] : null; },
+    listModels() { return Promise.resolve({ current: null, defaultModel: { provider: 'mock', modelId: 'deepseek-flash' }, models: [{ provider: 'mock', modelId: 'deepseek-mock-1', name: 'Mock 模型', available: true, needsAuth: false }] }); },
+    /** 模型设置面板在 mock 模式下的假数据：两个「国内厂商」+ 一个未配置的，用来验卡片态。 */
+    listProviders() {
+      return Promise.resolve({
+        current: null,
+        defaultModel: { provider: 'deepseek', modelId: 'deepseek-flash' },
+        featured: ['deepseek', 'zai'],
+        providers: [
+          {
+            provider: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com',
+            configured: true, authSource: 'stored',
+            models: [
+              { modelId: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1000000, maxTokens: 384000, available: true },
+              { modelId: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1000000, maxTokens: 384000, available: true },
+            ],
+          },
+          {
+            provider: 'zai', name: 'Z.AI', baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+            configured: false, authSource: null,
+            models: [{ modelId: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1000000, maxTokens: 131072, available: false }],
+          },
+          {
+            provider: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1',
+            configured: false, authSource: null,
+            models: [{ modelId: 'gpt-5', name: 'GPT-5', contextWindow: 400000, maxTokens: 128000, available: false }],
+          },
+        ],
+      });
+    },
+    setModel() { return Promise.resolve({ ok: true, note: '新会话生效' }); },
+    setApiKey() { return Promise.resolve({ ok: true, persisted: true }); },
   };
 }
 

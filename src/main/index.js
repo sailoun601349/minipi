@@ -31,11 +31,38 @@ try {
 
 import { Menu, app, dialog, ipcMain, shell } from "electron";
 
+/*
+ * ── 关掉 GPU 进程自己的 sandbox（否则本机 App 起不来） ─────────────────────
+ *
+ * 现象（本机实测，2026-09-24）：Electron 主进程能跑到 `app.whenReady()`、窗口也建了，
+ * 但 GPU 子进程反复以 `exit_code=-1073741819`（0xC0000005，ACCESS_VIOLATION）退出，
+ * 重试若干次后 Chromium 直接 `FATAL ... GPU process isn't usable. Goodbye.` 把整个
+ * App 带走——从双击到进程消失约 1 秒，看起来就是「闪退」。
+ *
+ * 实测过的旗标组合（`scripts/_probe-electron.mjs`）：
+ *   --disable-gpu            仍然崩（说明不是「GPU 不可用」，而是 GPU 进程起不来）
+ *   --in-process-gpu         换成 0xC0000005 崩在浏览器进程，更糟
+ *   --use-gl=swiftshader     仍然崩
+ *   --no-sandbox             能起，但把渲染进程的 sandbox 也一起关了，代价过大
+ *   --disable-gpu-sandbox    ✅ 能起，且**保留硬件加速**
+ *
+ * 所以只关 GPU 进程的 sandbox 这一颗，别去动 `--disable-gpu`：本 App 是透明悬浮窗，
+ * Windows 上透明依赖 DWM 合成，关掉 GPU 会把透明一起弄坏。
+ *
+ * 想恢复 Electron 默认行为（保留 GPU sandbox）就设 `MINIPI_KEEP_GPU_SANDBOX=1`。
+ */
+if (process.platform === "win32" && process.env.MINIPI_KEEP_GPU_SANDBOX !== "1") {
+  app.commandLine.appendSwitch("disable-gpu-sandbox");
+}
+
 import {
+  DEFAULT_MODEL_PREFERENCE,
   DEFAULT_SCENE_ID,
   ERROR_CODES,
   EVENTS,
+  FEATURED_PROVIDER_IDS,
   INVOKE,
+  LIMITS,
   PROTOCOL_VERSION,
   SCENE_IDS,
   errorMessage,
@@ -117,7 +144,12 @@ function bootstrap() {
   });
 
   /** @type {PiSessionHost} */
-  const pi = new PiSessionHost({ emit: (wrapped) => sendEvent(wrapped), logger: log, approval: approvalGate });
+  const pi = new PiSessionHost({
+    emit: (wrapped) => sendEvent(wrapped),
+    logger: log,
+    approval: approvalGate,
+    modelPreference: () => settings.get().model,
+  });
   /**
    * 产出链路服务（M5）。
    *
@@ -415,6 +447,39 @@ export function registerIpc({ settings, wm, pi, outcome, approval, log = console
   handle(INVOKE.LIST_OUTCOMES, (arg) => {
     if (!outcome) throw new Error(errorMessage(ERROR_CODES.INTERNAL, "产出服务未初始化"));
     return outcome.list(arg);
+  });
+
+  /* ---------------- 模型配置 ---------------- */
+  handle(INVOKE.LIST_MODELS, async () => ({
+    current: settings.get().model,
+    defaultModel: DEFAULT_MODEL_PREFERENCE,
+    models: (await pi.listModels()).slice(0, LIMITS.MODEL_CATALOG_MAX),
+  }));
+  // 模型设置页的提供方目录。`featured` 是「默认展示哪些厂商」——渲染层不自己算，
+  // 免得两边各维护一份国内厂商清单（清单本体在 protocol.js 的 FEATURED_PROVIDER_IDS）。
+  handle(INVOKE.LIST_PROVIDERS, async () => ({
+    current: settings.get().model,
+    defaultModel: DEFAULT_MODEL_PREFERENCE,
+    featured: FEATURED_PROVIDER_IDS,
+    providers: await pi.listProviders(),
+  }));
+  handle(INVOKE.SET_MODEL, (arg) => {
+    if (arg.model === null) return settings.set({ model: null });
+    const model = arg.model;
+    if (!isPlainObject(model) || typeof model.provider !== "string" || typeof model.modelId !== "string" ||
+        model.provider.length === 0 || model.provider.length > LIMITS.MODEL_PROVIDER_MAX_CHARS ||
+        model.modelId.length === 0 || model.modelId.length > LIMITS.MODEL_ID_MAX_CHARS) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "model 必须包含合法的 provider 和 modelId"));
+    }
+    settings.set({ model: { provider: model.provider.trim(), modelId: model.modelId.trim() } });
+    return { ok: true, model: settings.get().model, note: "新会话生效" };
+  });
+  handle(INVOKE.SET_API_KEY, async (arg) => {
+    if (typeof arg.providerId !== "string" || !arg.providerId.trim() || typeof arg.apiKey !== "string" ||
+        !arg.apiKey || arg.apiKey.length > LIMITS.MODEL_API_KEY_MAX_CHARS) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "providerId 和 apiKey 必须有效"));
+    }
+    return pi.setModelApiKey({ providerId: arg.providerId.trim(), apiKey: arg.apiKey });
   });
 
   /* ---------------- M4 审批闸门 ---------------- */

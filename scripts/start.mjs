@@ -29,6 +29,8 @@ const require = createRequire(import.meta.url);
 const POISONOUS_ENV = ["ELECTRON_RUN_AS_NODE", "ELECTRON_NO_ATTACH_CONSOLE", "ELECTRON_FORCE_IS_PACKAGED"];
 
 const argv = process.argv.slice(2);
+const launcherStamp = new Date().toISOString();
+console.log(`[minipi:start] 启动时间=${launcherStamp}`);
 const selftestIdx = argv.indexOf("--selftest");
 const wantSelftest = selftestIdx !== -1;
 if (wantSelftest) argv.splice(selftestIdx, 1);

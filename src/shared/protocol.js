@@ -57,6 +57,11 @@ export const INVOKE = Object.freeze({
   OPEN_OUTCOME: "minipi:openOutcome",
   SAVE_OUTCOME_AS: "minipi:saveOutcomeAs",
   LIST_OUTCOMES: "minipi:listOutcomes",
+  // 模型配置（偏好与凭证管理）
+  LIST_MODELS: "minipi:listModels",
+  LIST_PROVIDERS: "minipi:listProviders",
+  SET_MODEL: "minipi:setModel",
+  SET_API_KEY: "minipi:setApiKey",
   // M4 审批闸门（审批设计 §9.1）——渲染 → 主：用户点了「允许一次 / 拒绝 / 中断整轮」
   APPROVAL_DECIDE: "minipi:approvalDecide",
 });
@@ -98,6 +103,7 @@ export const ERROR_CODES = Object.freeze({
   OUTCOME_WRITE_FAILED: "OUTCOME_WRITE_FAILED",
   OUTCOME_NOT_FOUND: "OUTCOME_NOT_FOUND",
   SANDBOX_DENIED: "SANDBOX_DENIED",
+  MODEL_NOT_FOUND: "MODEL_NOT_FOUND",
   // M4 审批闸门（审批设计 §9.1 / §5）
   // APPROVAL_TIMEOUT：5 分钟未响应 ⇒ 默认拒绝（fail-closed，绝不放行）
   APPROVAL_TIMEOUT: "APPROVAL_TIMEOUT",
@@ -435,6 +441,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   sceneId: DEFAULT_SCENE_ID,
   /** D-01：默认**抢焦点**（能直接打字）；设 true 走 showInactive() 式唤起 */
   noFocusSteal: false,
+  /** 用户偏好的模型，仅影响新建会话；不包含任何密钥 */
+  model: null,
   window: Object.freeze({
     /** 上次退出时的形态 */
     state: WINDOW_STATE.BALL,
@@ -447,6 +455,41 @@ export const DEFAULT_SETTINGS = Object.freeze({
 export function createDefaultSettings() {
   return structuredClone(DEFAULT_SETTINGS);
 }
+
+/**
+ * **没配置时的默认模型**。
+ *
+ * 刻意不写进 `DEFAULT_SETTINGS.model`（那里保持 `null` = 「用默认」），
+ * 而是在 `resolvePreferredModel()` 里兜底 —— 好处是：
+ *   · `settings.json` 里 `"model": null` 的老用户**立刻**拿到新默认，不用迁移；
+ *   · 「默认」与「用户显式选的」在文件里可区分。
+ *
+ * 选 `deepseek/deepseek-flash` 的理由：国内直连可用的厂商里它最便宜最快，
+ * 而 minipi 的 quick 场景是「随手一问」，用不上 pro 的推理预算。
+ */
+export const DEFAULT_MODEL_PREFERENCE = Object.freeze({
+  provider: "deepseek",
+  modelId: "deepseek-flash",
+});
+
+/**
+ * 模型设置页**默认列出**的厂商（顺序即展示顺序）。
+ *
+ * 只放国内能直连的：DeepSeek / 智谱 / Kimi(Moonshot) / MiniMax / 通义(Qwen) / 小米 MiMo / Ant Ling。
+ * 其余 30 多个内置厂商（OpenAI、Anthropic、Bedrock…）不默认展示，但可以在
+ * 「添加提供方」里找出来。任何**已配置密钥**的厂商不论在不在这个表里都会被展示。
+ */
+export const FEATURED_PROVIDER_IDS = Object.freeze([
+  "deepseek",
+  "zai",
+  "zai-coding-cn",
+  "moonshotai-cn",
+  "kimi-coding",
+  "minimax-cn",
+  "qwen-token-plan-cn",
+  "xiaomi",
+  "ant-ling",
+]);
 
 /* ========================================================================== *
  * 7. 入参上下界（宿主层强制，渲染层可提前用同一份常量做前端校验）
@@ -483,6 +526,27 @@ export const LIMITS = Object.freeze({
   OUTCOME_TIMEOUT_MS: 60000,
   /** 用户那句「整理成周报」的长度上限（字符） */
   OUTCOME_INTENT_MAX_CHARS: 2000,
+  /** 模型 provider 标识长度上限 */
+  MODEL_PROVIDER_MAX_CHARS: 64,
+  /** 模型标识长度上限 */
+  MODEL_ID_MAX_CHARS: 128,
+  /** API key 长度上限 */
+  MODEL_API_KEY_MAX_CHARS: 512,
+  /** 模型目录最多展示条数 */
+  MODEL_CATALOG_MAX: 200,
+  /** 单个提供方最多回传的模型条数 */
+  PROVIDER_MODELS_MAX: 80,
+  /** 模型设置页最多回传的提供方条数 */
+  PROVIDER_LIST_MAX: 80,
+  // ---- 思考段 / 正文里的「模型吐出工具调用标记」识别（显示层）----
+  /** 单段文本里最多识别几个 `<invoke>` 块；超出的原样当正文显示 */
+  TOOL_INVOKE_MAX_BLOCKS: 20,
+  /** 单个 `<invoke>` 块的原文长度上限；超过就认定不是工具标记，原样当正文 */
+  TOOL_INVOKE_MAX_CHARS: 20000,
+  /** 单个 `<invoke>` 里最多解析几个 `<parameter>` */
+  TOOL_PARAM_MAX_ITEMS: 8,
+  /** 单个 parameter 值的长度上限（字符） */
+  TOOL_PARAM_MAX_CHARS: 2000,
   // ---- M4 审批闸门（审批设计 §9.1）----
   /** 审批等待上限；到点默认拒绝（300000ms = 5 分钟） */
   APPROVAL_TIMEOUT_MS: 300000,
@@ -572,6 +636,94 @@ export function isToolExecution(event) {
       event.type === "tool_execution_update" ||
       event.type === "tool_execution_end")
   );
+}
+
+/* ========================================================================== *
+ * 8b. 模型吐出的「工具调用标记」
+ * ========================================================================== */
+
+/**
+ * 为什么需要它（2026-09-24 真实事件流取证）：
+ *
+ * `quick` 场景是 `noTools: "all"` —— **模型手里一个工具都没有**。但模型仍会「想用工具」，
+ * 于是把 Anthropic 风格的工具调用语法**当正文写出来**：
+ *
+ *   <invoke name="cmd"><parameter name="cmd">dir /a</parameter>
+ *   <parameter name="justification">看看目录</parameter></invoke>
+ *
+ * 已用真实会话 dump 过事件流：Pi 只发 `thinking_*` / `text_*`，**没有 `toolcall_*` 子事件**，
+ * 最终 content blocks 也只有 `[thinking, text]` —— 也就是说这不是解析漏了，
+ * 而是**模型行为**。既然它不是真的工具调用，就不该按工具卡渲染；
+ * 但也不该让一屏尖括号糊在用户脸上。
+ *
+ * 所以：识别出来，折叠成一张「模型尝试调用工具 · 当前场景未启用」的提示卡。
+ *
+ * 边界（都往「宁可原样显示，不要误吞内容」一侧倒）：
+ *   · 只认 `<invoke name="…">…</invoke>` 这个确切形状，`<img>` / `<div>` 之类一律不碰；
+ *   · 块数超 `TOOL_INVOKE_MAX_BLOCKS`、单块超 `TOOL_INVOKE_MAX_CHARS` ⇒ 不再识别，
+ *     剩下的原样当正文（防模型吐一坨垃圾时把整段吞掉）。
+ *
+ * @param {unknown} text
+ * @returns {Array<{kind:"text", text:string} | {kind:"tool", name:string, raw:string, params:Array<{name:string, value:string}>}>}
+ */
+export function splitToolMarkup(text) {
+  const src = typeof text === "string" ? text : "";
+  if (src.length === 0) return [];
+  if (!/<invoke\s+name\s*=/i.test(src)) return [{ kind: "text", text: src }];
+
+  const parts = [];
+  const re = /<invoke\s+name\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\/invoke\s*>/gi;
+  let cursor = 0;
+  let blocks = 0;
+  let match = re.exec(src);
+
+  while (match !== null) {
+    if (blocks >= LIMITS.TOOL_INVOKE_MAX_BLOCKS) break;
+    const raw = match[0];
+    if (raw.length > LIMITS.TOOL_INVOKE_MAX_CHARS) break;
+
+    if (match.index > cursor) parts.push({ kind: "text", text: src.slice(cursor, match.index) });
+    parts.push({
+      kind: "tool",
+      name: String(match[1] ?? "").slice(0, LIMITS.MODEL_PROVIDER_MAX_CHARS),
+      raw,
+      params: parseToolParams(match[2]),
+    });
+    cursor = match.index + raw.length;
+    blocks += 1;
+    match = re.exec(src);
+  }
+
+  if (cursor === 0) return [{ kind: "text", text: src }];
+  if (cursor < src.length) parts.push({ kind: "text", text: src.slice(cursor) });
+  return parts;
+}
+
+/**
+ * 解析 `<invoke>` 体内的 `<parameter name="…">值</parameter>`。
+ * @param {string} body
+ * @returns {Array<{name:string, value:string}>}
+ */
+function parseToolParams(body) {
+  const out = [];
+  const src = typeof body === "string" ? body : "";
+  const re = /<parameter\s+name\s*=\s*"([^"]*)"\s*>([\s\S]*?)<\/parameter\s*>/gi;
+  let match = re.exec(src);
+  while (match !== null) {
+    if (out.length >= LIMITS.TOOL_PARAM_MAX_ITEMS) break;
+    out.push({
+      name: String(match[1] ?? "").slice(0, LIMITS.MODEL_PROVIDER_MAX_CHARS),
+      value: String(match[2] ?? "").trim().slice(0, LIMITS.TOOL_PARAM_MAX_CHARS),
+    });
+    match = re.exec(src);
+  }
+  return out;
+}
+
+/** 这段文本里有没有**完整**的工具调用标记（流式期间用来决定要不要提前切成卡片）。 */
+export function hasToolMarkup(text) {
+  if (typeof text !== "string" || text.length === 0) return false;
+  return /<\/invoke\s*>/i.test(text) && /<invoke\s+name\s*=/i.test(text);
 }
 
 /* ========================================================================== *

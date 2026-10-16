@@ -31,6 +31,11 @@ const SUITE = [
   { name: "verify:sandbox",         file: "verify-sandbox.mjs",         note: "沙箱（65 项）" },
   { name: "verify:v04",             file: "verify-v04.mjs",             note: "v0.4 总检（39 项）" },
   { name: "verify:outcome",         file: "verify-outcome.mjs",         note: "M5 产出（97 项）" },
+  { name: "verify:launcher",        file: "verify-launcher.mjs",        note: "双击启动器（静态）" },
+  { name: "verify:launch-live",     file: "verify-launch-live.mjs",     note: "双击启动器（真启动 + 存活）" },
+  { name: "qa:outcome-entry",       file: "qa-outcome-entry.mjs",       note: "真实产出入口" },
+  { name: "verify:models",           file: "verify-models.mjs",           note: "模型配置与凭证存储" },
+  { name: "verify:thought",         file: "verify-thought-markup.mjs",  note: "工具标记识别 + 镜像漂移" },
   { name: "verify:scene",           file: "check-scene-consistency.mjs", note: "场景一致性（48 项）" },
   { name: "qa:sandbox-attack",      file: "qa-sandbox-attack.mjs",      note: "沙箱攻击（66 项）" },
   { name: "qa:approval-contract",   file: "qa-approval-contract.mjs",   note: "M4 QA · 契约" },
@@ -39,6 +44,8 @@ const SUITE = [
   { name: "qa:outcome-adversarial", file: "qa-outcome-adversarial.mjs", note: "产出链路对抗（纯 Node）" },
   { name: "qa:contract-drift",      file: "qa-contract-drift.mjs",      note: "契约漂移（31 项）" },
   { name: "qa:renderer-edge",       file: "qa-renderer-edge.mjs",       note: "渲染边界（headless Chrome）" },
+  { name: "qa:mini-continuity",     file: "qa-mini-continuity.mjs",     note: "小窗连续流 + 工具卡（headless Chrome）" },
+  { name: "qa:model-panel",         file: "qa-model-panel.mjs",         note: "模型设置面板（headless Chrome）" },
   { name: "qa:approval-ui",         file: "qa-approval-ui.mjs",         note: "审批卡 UI（headless Chrome）" },
 ];
 
