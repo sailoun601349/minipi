@@ -135,12 +135,26 @@ const minipi = Object.freeze({
   /* -------- 模型配置 -------- */
   /** → { current, defaultModel, models: [{ provider, modelId, name, available, needsAuth }] } */
   listModels: () => call(INVOKE.LIST_MODELS),
-  /** → { current, defaultModel, featured: string[], providers: [{ provider, name, baseUrl, configured, authSource, models: [{ modelId, name, contextWindow, maxTokens, available }] }] } */
+  /** → { current, defaultModel, featured: string[], providers: [{ provider, name, baseUrl, api, configured, authSource, custom, edited, modelsEdited, models: [{ modelId, name, api, contextWindow, maxTokens, available }] }] } */
   listProviders: () => call(INVOKE.LIST_PROVIDERS),
   /** @param {{ model: { provider: string, modelId: string } | null }} arg */
   setModel: (arg) => call(INVOKE.SET_MODEL, arg),
   /** @param {{ providerId: string, apiKey: string }} arg；key 只透传，不回显 */
   setApiKey: (arg) => call(INVOKE.SET_API_KEY, arg),
+  /**
+   * 写入提供方定义（自定义 or 覆盖内置）。
+   * @param {{ provider: string, definition: { displayName?: string, baseUrl?: string, api?: string, models?: Array<{id: string, name?: string, contextWindow?: number, maxTokens?: number}> } }} arg
+   * ⚠ `definition` 里**不接受 apiKey** —— 密钥走 setApiKey（只写不读）。
+   */
+  setProvider: (arg) => call(INVOKE.SET_PROVIDER, arg),
+  /** @param {{ provider: string }} arg → { ok, provider, applied, removed, failed[] } */
+  removeProvider: (arg) => call(INVOKE.REMOVE_PROVIDER, arg),
+  /**
+   * 拉取提供方的可用模型清单（只读 GET）。
+   * @param {{ provider?: string, baseUrl: string, api?: string, apiKey?: string }} arg
+   * @returns {Promise<{ models: Array<{ modelId: string, name: string }>, url: string, protocol: string }>}
+   */
+  discoverModels: (arg) => call(INVOKE.DISCOVER_MODELS, arg),
 
   /* -------- M4 审批闸门 -------- */
 

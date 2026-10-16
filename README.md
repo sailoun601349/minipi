@@ -170,6 +170,9 @@ minipi/
 | `listProviders` | — | `{ current, defaultModel, featured[], providers[] }`（每个 provider 含 `{ provider, name, baseUrl, configured, authSource, models[{ modelId, name, contextWindow, maxTokens, available }] }`，**不含任何密钥**） |
 | `setModel` | `{ model: { provider, modelId } \| null }` | `{ ok, model, note }` |
 | `setApiKey` | `{ providerId, apiKey }` | `{ ok, persisted, warning? }`（key 只写不读） |
+| `setProvider` | `{ provider, definition }` | `{ ok, provider, applied[], removed[], failed[], note }`（`definition` = `{ displayName?, baseUrl?, api?, models? }`，**不含 apiKey**；`models: null` = 去掉模型目录覆盖） |
+| `removeProvider` | `{ provider }` | `{ ok, provider, applied[], removed[], failed[] }`（只删 minipi 自己的定义，Pi 的文件不动） |
+| `discoverModels` | `{ provider?, baseUrl, api?, apiKey? }` | `{ models: [{ modelId, name }], url, protocol }`（只读 GET；key 只进请求头） |
 | `getSettings` | — | `settings` |
 | `setSettings` | `partial` | `settings` |
 | `quit` | — | `void` |
@@ -339,6 +342,62 @@ try {
   `deepseek/deepseek-v4-pro` —— 用户看到的默认模型是随机结果，不是我们的选择。
 - 保存时**只提交真正被改过**的模型选项（卡片打开时记下初值），
   避免「点开卡片随手点保存」就把该提供方的第一个模型设成全局默认。
+
+#### 5.7.1 自定义提供方 / 覆盖内置（第二批）
+
+UI：卡片编辑器的「自定义设置」折叠区（API 地址 + API 协议 + 模型目录行 + 「获取可用模型」
++「恢复默认模型目录」），以及底部的「+ 添加自定义提供方」表单（Provider ID / 显示名 /
+API 地址 / 协议 / 密钥 / 模型目录）。卡片行头还带「删除提供方 / 移除覆盖」（两步确认）。
+
+**配置住在哪：`~/.minipi/providers.json`，不是 Pi 的 `models.json`。**
+Pi 自己的 `~/.pi/agent/models.json` 里可能已经有用户手写的东西（本机那份就含明文 `apiKey`），
+去写它等于把别人的配置置于被整段重写的风险之下；本仓库也早立过规矩：**绝不改动 Pi 的文件**。
+所以 minipi 的提供方定义只存自己的目录，启动时用 Pi 的公开 API 注入运行时：
+
+```text
+~/.minipi/providers.json  ──load──▶  ProviderStore
+                                       │ applyProviderDefinitions()
+                                       ▼
+              ModelRuntime.registerProvider(id, cfg) / unregisterProvider(id)
+```
+
+代价与边界写清楚：
+
+| | |
+|---|---|
+| ✅ 重启后仍在 | 存在自己的文件里 |
+| ✅ 立即生效 | `registerProvider` 是同步的，新会话即可选中（不重建已有会话） |
+| ❌ `pi` 命令行看不到 | 这是刻意的范围划分：minipi 的自定义提供方是 minipi 的事 |
+
+**文件里只有结构，没有密钥。** `apiKey` 走既有的 `~/.minipi/credentials.json`
+（`setApiKey`，只写不读）。这与 Pi 的 models.json 支持 `apiKey: "sk-..."` 字面量**故意不同** ——
+「提供一个能把明文密钥写进配置文件的入口」不是特性，是负债。
+
+**存在即覆盖。** 一个 id 出现在 providers.json 里，就在运行时被 `registerProvider` 覆盖：
+
+- id 是**内置**的 → 覆盖它。只给 `baseUrl` 就是换端点（内置模型**不丢**，已实测）；
+  给了 `models` 就是**替换整个模型目录**。
+- id 是**新的** → 就是一个自定义提供方。
+- 删掉这个 id → `unregisterProvider(id)`。实测它**只摘覆盖层**：内置提供方会回落到原始定义，
+  模型一个不少（`deepseek` 回到 `https://api.deepseek.com`、仍是 2 个模型）。
+
+因此同步语义就是「**先卸掉当前已注册但不在目标里的，再按目标逐个注册**」，
+运行时严格等于存储（`applyProviderDefinitions()`，逐个隔离故障：一个注入失败不影响其它）。
+
+**校验（`ProviderStore` 归一化，非法一律 `PROVIDER_INVALID`）**：Provider ID 必须
+`^[a-z][a-z0-9-]*$`；API 地址必须是 http(s)（挡住 `file://` / `javascript:`）；协议必须在
+`PROVIDER_API_IDS` 四值内；模型 id 非空、不重复、不超长；模型条数 ≤ 80。
+**带 `models` 就必须带 `api`** —— 否则 Pi 组不出 provider（内置的协议不会被继承）；
+UI 里没填时会尝试从该提供方现有模型推断，推断不出来就明确报错，不静默放行。
+
+**「获取可用模型」**（`src/main/pi/discover-models.js`）是我们自己实现的一次只读 GET，
+不是 Pi 的 `runtime.refresh()` —— 后者依赖 provider 注册时带 `refreshModels()`，
+而且会把结果写进 Pi 的目录缓存；我们要的语义是「拉一份候选清单 → 用户勾选 → 并进目录」。
+支持 `openai-completions` / `openai-responses`（`{baseUrl}/models`，`Authorization: Bearer`）
+与 `anthropic-messages`（`{baseUrl}/v1/models`，`x-api-key` + `anthropic-version`）；
+`google-generative-ai` **显式报错**而不是静默返回空数组（「没有模型」和「拉不到」在界面上长得一样，
+但含义完全不同）。硬超时 15s + 响应体 2MB 上限；密钥**只进请求头**，绝不进返回值 / 错误文案 / 日志
+（`verify:providers` 有专项断言）。
 
 ---
 

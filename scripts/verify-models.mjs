@@ -5,7 +5,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MinipiCredentialStore } from "../src/main/pi/credentials-store.js";
 import { buildModelCatalog, buildProviderCatalog, resolvePreferredModel } from "../src/main/pi/session.js";
-import { DEFAULT_MODEL_PREFERENCE, DEFAULT_SETTINGS, FEATURED_PROVIDER_IDS, INVOKE, LIMITS } from "../src/shared/protocol.js";
+import {
+  DEFAULT_MODEL_PREFERENCE,
+  DEFAULT_SETTINGS,
+  FEATURED_PROVIDER_IDS,
+  INVOKE,
+  LIMITS,
+  PROVIDER_API_IDS,
+  PROVIDER_ID_PATTERN_SOURCE,
+} from "../src/shared/protocol.js";
 import { normalizeSettings } from "../src/main/settings.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -75,12 +83,82 @@ check("catalog is credential-free", !JSON.stringify(catalog).includes("key") && 
 check("default model preference is null", DEFAULT_SETTINGS.model === null);
 check("model invoke channels exist", INVOKE.LIST_MODELS && INVOKE.SET_MODEL && INVOKE.SET_API_KEY);
 check("provider invoke channel exists", INVOKE.LIST_PROVIDERS === "minipi:listProviders");
-check("preload 暴露 listProviders",
-  /listProviders:\s*\(\)\s*=>\s*call\(INVOKE\.LIST_PROVIDERS\)/.test(fs.readFileSync(path.join(root, "src", "preload", "index.js"), "utf8")));
-check("main 注册 LIST_PROVIDERS 处理器",
-  /handle\(INVOKE\.LIST_PROVIDERS/.test(fs.readFileSync(path.join(root, "src", "main", "index.js"), "utf8")));
+check(
+  "提供方定义三个通道齐备",
+  INVOKE.SET_PROVIDER === "minipi:setProvider" &&
+    INVOKE.REMOVE_PROVIDER === "minipi:removeProvider" &&
+    INVOKE.DISCOVER_MODELS === "minipi:discoverModels",
+);
+{
+  const preload = fs.readFileSync(path.join(root, "src", "preload", "index.js"), "utf8");
+  const main = fs.readFileSync(path.join(root, "src", "main", "index.js"), "utf8");
+  const renderer = fs.readFileSync(path.join(root, "src", "renderer", "index.html"), "utf8");
+  check("preload 暴露 listProviders", /listProviders:\s*\(\)\s*=>\s*call\(INVOKE\.LIST_PROVIDERS\)/.test(preload));
+  check("preload 暴露 setProvider / removeProvider / discoverModels",
+    /setProvider:\s*\(arg\)\s*=>/.test(preload) && /removeProvider:\s*\(arg\)\s*=>/.test(preload) && /discoverModels:\s*\(arg\)\s*=>/.test(preload));
+  check("main 注册 LIST_PROVIDERS 处理器", /handle\(INVOKE\.LIST_PROVIDERS/.test(main));
+  check("main 注册 SET_PROVIDER / REMOVE_PROVIDER / DISCOVER_MODELS",
+    /handle\(INVOKE\.SET_PROVIDER/.test(main) && /handle\(INVOKE\.REMOVE_PROVIDER/.test(main) && /handle\(INVOKE\.DISCOVER_MODELS/.test(main));
+  check("main 把 providerStore 注入 PiSessionHost", /providerStore,/.test(main) && /new ProviderStore\(/.test(main));
+  // ⚠ 比的是**调用点** `pi.init().catch`，不是裸的 `pi.init`：文件里还有一句
+  //   「提供方定义必须在 pi.init() 之前加载完」的注释，裸搜会搜到注释、结论就反了。
+  check(
+    "main 在真正调用 pi.init() 之前加载 providerStore",
+    main.indexOf("providerStore.load()") < main.indexOf("pi.init().catch"),
+  );
+  check("providerStore 走的是 minipi 自己的文件（不碰 Pi 的 models.json）",
+    /PROVIDERS_PATH = path\.join\(os\.homedir\(\), "\.minipi", "providers\.json"\)/.test(
+      fs.readFileSync(path.join(root, "src", "main", "pi", "providers-store.js"), "utf8"),
+    ));
+  check("providers-store 不写 apiKey（只存结构）",
+    !/out\.apiKey\s*=/.test(fs.readFileSync(path.join(root, "src", "main", "pi", "providers-store.js"), "utf8")));
+  check("★ 渲染层的 PROVIDER_API_IDS 镜像与 protocol.js 逐字一致",
+    PROVIDER_API_IDS.every((api) => renderer.includes(`'${api}'`)));
+  check("渲染层没有自己写死 KEY_API_IDS 之外的协议", !/api:\s*'openai-completions',\s*\n\s*api:\s*'/i.test(renderer));
+}
 check("model limits exist", LIMITS.MODEL_CATALOG_MAX === 200 && LIMITS.MODEL_API_KEY_MAX_CHARS === 512);
 check("provider limits exist", LIMITS.PROVIDER_LIST_MAX === 80 && LIMITS.PROVIDER_MODELS_MAX === 80);
+check(
+  "提供方第二批的上限齐备",
+  LIMITS.PROVIDER_ID_MAX_CHARS > 0 &&
+    LIMITS.PROVIDER_BASE_URL_MAX_CHARS > 0 &&
+    LIMITS.PROVIDER_MODEL_ID_MAX_CHARS > 0 &&
+    LIMITS.DISCOVER_MODELS_TIMEOUT_MS > 0 &&
+    LIMITS.DISCOVER_MODELS_MAX > 0 &&
+    LIMITS.DISCOVER_MODELS_MAX_BYTES > 0,
+);
+check("协议枚举恰好 4 个且含 anthropic-messages",
+  PROVIDER_API_IDS.length === 4 && PROVIDER_API_IDS.includes("anthropic-messages") && PROVIDER_API_IDS.includes("google-generative-ai"));
+check("Provider ID 形态是「小写字母开头 + [a-z0-9-]」", PROVIDER_ID_PATTERN_SOURCE === "^[a-z][a-z0-9-]*$");
+
+/* ---- provider catalog 的第二批字段 ---- */
+{
+  const baseline = ["deepseek", "zai"];
+  const defs = { zai: { provider: "zai", baseUrl: "https://proxy/v1" }, "qa-new": { provider: "qa-new" } };
+  const rows = buildProviderCatalog(
+    {
+      getProviders: () => [
+        { id: "deepseek", name: "DeepSeek" },
+        { id: "zai", name: "Z.AI", baseUrl: "https://proxy/v1" },
+        { id: "qa-new", name: "qa-new", baseUrl: "https://x/v1" },
+      ],
+      getModels: (id) => (id === "zai" ? [{ id: "glm", name: "GLM", api: "openai-completions" }] : []),
+      getAvailableSnapshot: () => [],
+      getProviderAuthStatus: () => ({ configured: false }),
+    },
+    defs,
+    baseline,
+  );
+  const zai = rows.find((r) => r.provider === "zai");
+  const qa = rows.find((r) => r.provider === "qa-new");
+  const ds = rows.find((r) => r.provider === "deepseek");
+  check("catalog: 被覆盖的内置 ⇒ edited 但不 custom", zai.edited === true && zai.custom === false);
+  check("catalog: 基线里没有的 ⇒ custom", qa.custom === true && qa.edited === true);
+  check("catalog: 没动过的内置 ⇒ 两个标记都是 false", ds.edited === false && ds.custom === false);
+  check("catalog: 回传 hasBaseUrlOverride", zai.hasBaseUrlOverride === true && ds.hasBaseUrlOverride === false);
+  check("catalog: 回传提供方协议（取自模型）", zai.api === "openai-completions");
+  check("catalog: 回传模型的 api", zai.models[0].api === "openai-completions");
+}
 check("settings normalizes model", normalizeSettings({ model: { provider: "mock", modelId: "m1" } }).model.modelId === "m1");
 check("settings rejects malformed model", normalizeSettings({ model: { provider: "", modelId: "m1" } }).model === null);
 

@@ -76,6 +76,8 @@ import { SettingsStore, ensureAppDirs, MINIPI_HOME } from "./settings.js";
 import { WindowManager } from "./window.js";
 import { grabSelection, registerHotkeys } from "./hotkeys.js";
 import { PiSessionHost, sanitizeDetail } from "./pi/session.js";
+import { ProviderStore } from "./pi/providers-store.js";
+import { discoverModels } from "./pi/discover-models.js";
 import { OutcomeService } from "./pi/outcome/index.js";
 import { ApprovalGate } from "./pi/approval.js";
 
@@ -122,6 +124,11 @@ if (NO_BOOTSTRAP) {
 function bootstrap() {
   /** @type {SettingsStore} */
   const settings = new SettingsStore();
+  /**
+   * minipi 自己的提供方定义（`~/.minipi/providers.json`）。
+   * 在 `PiSessionHost` 之前构造：host 初始化 Pi 运行时时会立刻读它并注入。
+   */
+  const providerStore = new ProviderStore({ logger: log });
   /** @type {WindowManager | null} */
   let wm = null;
 
@@ -149,6 +156,9 @@ function bootstrap() {
     logger: log,
     approval: approvalGate,
     modelPreference: () => settings.get().model,
+    // minipi 自己的提供方定义（自定义 / 覆盖内置）。**不写 Pi 的 models.json**，
+    // 通过 ModelRuntime.registerProvider() 注入运行时 —— 理由见 providers-store.js 文件头。
+    providerStore,
   });
   /**
    * 产出链路服务（M5）。
@@ -241,6 +251,12 @@ function bootstrap() {
     ensureAppDirs();
     const loaded = settings.load();
     for (const w of settings.warnings) log.warn?.(`[minipi] ${w}`);
+    // 提供方定义必须在 pi.init() 之前加载完 —— init 里会立刻把它注入 ModelRuntime
+    providerStore.load();
+    for (const w of providerStore.warnings) log.warn?.(`[minipi] ${w}`);
+    if (providerStore.ids().length > 0) {
+      log.info?.(`[minipi] 已载入 ${providerStore.ids().length} 个提供方定义：${providerStore.ids().join(", ")}`);
+    }
     log.info?.(
       `[minipi] 设置已载入 · 场景 ${loaded.sceneId} · 形态 ${loaded.window.state} · 不抢焦点 ${loaded.noFocusSteal}`,
     );
@@ -480,6 +496,43 @@ export function registerIpc({ settings, wm, pi, outcome, approval, log = console
       throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "providerId 和 apiKey 必须有效"));
     }
     return pi.setModelApiKey({ providerId: arg.providerId.trim(), apiKey: arg.apiKey });
+  });
+
+  // 写入提供方定义（自定义 or 覆盖内置）：id 形态 / baseUrl 是否 http(s) / 协议枚举 /
+  // 模型条目合法性**全部**在 ProviderStore 的归一化里判，非法一律 PROVIDER_INVALID。
+  handle(INVOKE.SET_PROVIDER, (arg) => {
+    if (typeof arg.provider !== "string" || arg.provider.trim().length === 0) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "provider 不能为空"));
+    }
+    return pi.setProvider({ provider: arg.provider, definition: arg.definition });
+  });
+
+  // 只删 minipi 自己的定义；Pi 的 models.json / auth.json 一个字节都不动。
+  handle(INVOKE.REMOVE_PROVIDER, (arg) => {
+    if (typeof arg.provider !== "string" || arg.provider.trim().length === 0) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "provider 不能为空"));
+    }
+    return pi.removeProvider({ provider: arg.provider });
+  });
+
+  // 「获取可用模型」：一次 GET，只读远端。key 可来自尚未保存的输入框。
+  handle(INVOKE.DISCOVER_MODELS, async (arg) => {
+    if (typeof arg.baseUrl !== "string" || arg.baseUrl.trim().length === 0) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "baseUrl 不能为空"));
+    }
+    if (arg.baseUrl.length > LIMITS.PROVIDER_BASE_URL_MAX_CHARS) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "baseUrl 过长"));
+    }
+    if (arg.api !== undefined && arg.api !== null && typeof arg.api !== "string") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "api 必须是字符串"));
+    }
+    const apiKey = typeof arg.apiKey === "string" ? arg.apiKey : "";
+    if (apiKey.length > LIMITS.MODEL_API_KEY_MAX_CHARS) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "apiKey 过长"));
+    }
+    // ⚠ 日志里**绝不打印 apiKey**；这里只打协议与主机名
+    log.info?.(`[minipi:ipc] 获取可用模型 · provider=${arg.provider ?? "(未指定)"} · api=${arg.api ?? "openai-completions"}`);
+    return discoverModels({ baseUrl: arg.baseUrl, api: arg.api, apiKey });
   });
 
   /* ---------------- M4 审批闸门 ---------------- */

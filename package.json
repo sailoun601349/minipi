@@ -31,6 +31,7 @@
     "qa:outcome-entry": "node scripts/qa-outcome-entry.mjs",
     "verify:models": "node scripts/verify-models.mjs",
     "verify:thought": "node scripts/verify-thought-markup.mjs",
+    "verify:providers": "node scripts/verify-providers.mjs",
     "qa:mini-continuity": "node scripts/qa-mini-continuity.mjs",
     "qa:model-panel": "node scripts/qa-model-panel.mjs",
     "verify:live": "node scripts/verify-sandbox-live.mjs",

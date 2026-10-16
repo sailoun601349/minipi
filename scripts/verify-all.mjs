@@ -41,6 +41,7 @@ const SUITE = [
   { name: "qa:outcome-entry",       file: "qa-outcome-entry.mjs",       note: "真实产出入口" },
   { name: "verify:models",           file: "verify-models.mjs",           note: "模型配置与凭证存储" },
   { name: "verify:thought",         file: "verify-thought-markup.mjs",  note: "工具标记识别 + 镜像漂移" },
+  { name: "verify:providers",       file: "verify-providers.mjs",       note: "提供方定义 / 注入 / 拉模型" },
   { name: "verify:scene",           file: "check-scene-consistency.mjs", note: "场景一致性（48 项）" },
   { name: "qa:sandbox-attack",      file: "qa-sandbox-attack.mjs",      note: "沙箱攻击（66 项）" },
   { name: "qa:approval-contract",   file: "qa-approval-contract.mjs",   note: "M4 QA · 契约" },

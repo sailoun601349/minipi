@@ -50,6 +50,7 @@ import {
   LIMITS,
   APPROVAL_TOOLS,
   OUTBOX_SCENES,
+  PROVIDER_API_IDS,
   SESSION_STATUS,
   STREAMING_BEHAVIOR,
   errorMessage,
@@ -214,23 +215,102 @@ export function resolvePreferredModel(pref, getModel, fallback = DEFAULT_MODEL_P
 }
 
 /**
+ * 把 minipi 的提供方定义翻成 Pi 的 `ProviderConfigInput`。**纯函数**。
+ *
+ * 关键映射（字段名两边不一样，别混）：
+ *   minipi `displayName` → Pi `name`
+ *   minipi `models[].id`  → Pi `models[].id`（`name` 缺省用 id 补）
+ * 模型级也补 `api`：内置提供方被覆盖整个目录时，Provider 级 api 不一定能继承下来。
+ *
+ * @param {object} def 已归一化的定义（见 providers-store.js）
+ * @returns {object} ProviderConfigInput
+ */
+export function toProviderConfigInput(def) {
+  const out = {};
+  if (typeof def?.displayName === "string" && def.displayName.length > 0) out.name = def.displayName;
+  if (typeof def?.baseUrl === "string" && def.baseUrl.length > 0) out.baseUrl = def.baseUrl;
+  if (typeof def?.api === "string" && def.api.length > 0) out.api = def.api;
+  if (Array.isArray(def?.models)) {
+    out.models = def.models.map((m) => {
+      /** @type {Record<string, unknown>} */
+      const model = { id: m.id, name: m.name || m.id };
+      if (typeof def.api === "string" && def.api.length > 0) model.api = def.api;
+      if (Number.isSafeInteger(m.contextWindow)) model.contextWindow = m.contextWindow;
+      if (Number.isSafeInteger(m.maxTokens)) model.maxTokens = m.maxTokens;
+      return model;
+    });
+  }
+  return out;
+}
+
+/**
+ * 把一份「提供方定义表」同步进运行时。**让运行时严格等于存储**：
+ *   1. 先 `unregisterProvider` 掉「当前已注册、但目标里没有」的 id
+ *      —— 实测这只摘掉我们注册的覆盖层，内置提供方会**回落到原始定义**（模型不丢）；
+ *   2. 再按目标逐个 `registerProvider`。
+ *
+ * ⚠ 假设：本进程里只有 minipi 自己在调 `registerProvider`（我们没用扩展注册提供方）。
+ *    若将来引入扩展提供方，这里要改成「只卸自己记录过的 id」。
+ *
+ * @param {import("@earendil-works/pi-coding-agent").ModelRuntime | undefined} runtime
+ * @param {Record<string, object>} definitions
+ * @returns {{ applied: string[], removed: string[], failed: Array<{id:string, reason:string}> }}
+ */
+export function applyProviderDefinitions(runtime, definitions) {
+  const report = { applied: [], removed: [], failed: [] };
+  if (!runtime || typeof runtime.registerProvider !== "function") return report;
+  const want = definitions && typeof definitions === "object" ? definitions : {};
+
+  const registered = typeof runtime.getRegisteredProviderIds === "function" ? runtime.getRegisteredProviderIds() : [];
+  for (const id of registered) {
+    if (want[id]) continue;
+    try {
+      runtime.unregisterProvider(id);
+      report.removed.push(id);
+    } catch (err) {
+      report.failed.push({ id, reason: sanitizeDetail(err) });
+    }
+  }
+
+  for (const [id, def] of Object.entries(want)) {
+    try {
+      runtime.registerProvider(id, toProviderConfigInput(def));
+      report.applied.push(id);
+    } catch (err) {
+      report.failed.push({ id, reason: sanitizeDetail(err) });
+    }
+  }
+  return report;
+}
+
+/**
  * 一次性取齐设置页要用的模型目录（脱敏：**绝不回传密钥**）。
  *
  * 返回形状对齐「提供方卡片」的信息架构：
- *   `{ provider, name, baseUrl, configured, authSource, models[] }`
+ *   `{ provider, name, baseUrl, api, configured, authSource, custom, edited, modelsEdited, models[] }`
+ *
+ * `custom` 的判定需要**基线**：只有「minipi 定义里有、而基线（Pi 内置 + models.json）里没有」
+ * 才算我们新建的提供方。基线由 `PiSessionHost.init()` 在注入定义**之前**抓下来传进来 ——
+ * 不抓基线就分不清「我新建的」和「我覆盖的内置」。
  *
  * @param {import("@earendil-works/pi-coding-agent").ModelRuntime | undefined} runtime
+ * @param {Record<string, object>} [definitions] minipi 自己的提供方定义
+ * @param {Iterable<string>} [baselineIds] 注入定义**之前**就存在的提供方 id
  */
-export function buildProviderCatalog(runtime) {
+export function buildProviderCatalog(runtime, definitions = {}, baselineIds = []) {
   const providers = runtime?.getProviders?.() ?? [];
   const available = new Set((runtime?.getAvailableSnapshot?.() ?? []).map((m) => `${m.provider}/${m.id}`));
+  const defs = definitions && typeof definitions === "object" ? definitions : {};
+  const baseline = new Set(baselineIds);
   return providers.slice(0, LIMITS.PROVIDER_LIST_MAX).map((provider) => {
     const auth = runtime?.getProviderAuthStatus?.(provider.id) ?? { configured: false };
+    const def = defs[provider.id];
     const models = (runtime?.getModels?.(provider.id) ?? [])
       .slice(0, LIMITS.PROVIDER_MODELS_MAX)
       .map((model) => ({
         modelId: model.id,
         name: model.name || model.id,
+        api: typeof model.api === "string" ? model.api : null,
         contextWindow: Number.isFinite(model.contextWindow) ? model.contextWindow : null,
         maxTokens: Number.isFinite(model.maxTokens) ? model.maxTokens : null,
         available: available.has(`${provider.id}/${model.id}`),
@@ -239,8 +319,18 @@ export function buildProviderCatalog(runtime) {
       provider: provider.id,
       name: provider.name || provider.id,
       baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : null,
+      // 该提供方当前的协议（取第一个带 api 的模型）——UI 编辑模型目录时用它预填
+      api: models.find((m) => m.api)?.api ?? null,
       configured: auth.configured === true,
       authSource: typeof auth.source === "string" ? auth.source : null,
+      /** minipi **新建**的提供方（基线里没有这个 id） */
+      custom: Boolean(def) && !baseline.has(provider.id),
+      /** minipi 里有这个 id 的定义（自定义 **或** 对内置的覆盖） */
+      edited: Boolean(def),
+      /** 定义里带了模型目录（= 替换整个目录，而不是只改端点） */
+      modelsEdited: Array.isArray(def?.models) && def.models.length > 0,
+      /** 定义里显式覆盖了 API 地址（UI 做「恢复默认模型目录」时要保住这个覆盖） */
+      hasBaseUrlOverride: typeof def?.baseUrl === "string" && def.baseUrl.length > 0,
       models,
     };
   });
@@ -279,6 +369,19 @@ export class PiSessionHost {
     /** @type {{request:Function,cancelBySession:Function}|null} */
     this._approval = options.approval ?? null;
     this._modelPreference = typeof options.modelPreference === "function" ? options.modelPreference : () => undefined;
+    /**
+     * minipi 自己的提供方定义存储（`~/.minipi/providers.json`）。
+     * 注入而非 import —— 这样 `session.js` 依旧只有 SDK 一个外部依赖，
+     * 而存储层（含原子写、白名单）能在纯 Node 下单独测。
+     * @type {{get:Function,set:Function,remove:Function}|null}
+     */
+    this._providerStore = options.providerStore ?? null;
+    /**
+     * 注入定义**之前**的提供方 id 集合（Pi 内置 + models.json）。
+     * 用来区分「minipi 新建的自定义提供方」与「被 minipi 覆盖的内置提供方」。
+     * @type {Set<string> | null}
+     */
+    this._baselineProviderIds = null;
 
     /** @type {Map<string, SessionRecord>} */
     this._records = new Map();
@@ -316,6 +419,12 @@ export class PiSessionHost {
         this._credentialStore = credentials;
         const rt = await ModelRuntime.create({ credentials });
         this._modelRuntime = rt;
+        // 基线：**注入我们自己的定义之前**就已存在的提供方（Pi 内置 + models.json）。
+        // 有了它才能区分「minipi 新建的自定义提供方」和「被 minipi 覆盖的内置提供方」。
+        this._baselineProviderIds = new Set((rt.getProviders?.() ?? []).map((p) => p.id));
+        // 把 minipi 自己的提供方定义（自定义 / 覆盖）注入运行时。
+        // 放在 create() 之后、任何人拿 runtime 之前 —— 这样第一个会话建出来就带着覆盖。
+        this._applyProviders();
         return rt;
       })();
     }
@@ -343,12 +452,103 @@ export class PiSessionHost {
   }
 
   /**
-   * 模型设置页用的**提供方目录**（每个提供方带自己的模型清单 + 密钥状态）。
+   * 模型设置页用的**提供方目录**（每个提供方带自己的模型清单 + 密钥状态 + 覆盖状态）。
    * 只回传脱敏信息：没有 key、没有 token、没有 headers。
    */
   async listProviders() {
     await this.init();
-    return buildProviderCatalog(this._modelRuntime);
+    return buildProviderCatalog(
+      this._modelRuntime,
+      this._providerStore?.get() ?? {},
+      this._baselineProviderIds ?? [],
+    );
+  }
+
+  /** 把存储里的提供方定义同步进运行时。返回一份可直接回给 UI 的报告。 */
+  _applyProviders() {
+    if (!this._modelRuntime) return { applied: [], removed: [], failed: [] };
+    const report = applyProviderDefinitions(this._modelRuntime, this._providerStore?.get() ?? {});
+    for (const f of report.failed) {
+      this._logger.warn?.(`[minipi:pi] 提供方 ${f.id} 注入失败（已跳过，不影响其它提供方）：${f.reason}`);
+    }
+    return report;
+  }
+
+  /**
+   * 写入一个提供方定义（自定义 or 对内置的覆盖），**立即生效于新会话**。
+   * @param {{ provider: string, definition: unknown }} input
+   */
+  async setProvider(input) {
+    await this.init();
+    if (!this._providerStore) {
+      throw new Error(errorMessage(ERROR_CODES.INTERNAL, "提供方存储未初始化"));
+    }
+    const providerId = input?.provider;
+    if (typeof providerId !== "string" || providerId.trim().length === 0) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "provider 不能为空"));
+    }
+    let saved;
+    try {
+      saved = this._providerStore.set(providerId.trim(), input?.definition);
+    } catch {
+      throw new Error(
+        errorMessage(
+          ERROR_CODES.PROVIDER_INVALID,
+          "提供方定义非法：id 需为小写字母开头的 [a-z0-9-]，API 地址需为 http(s)，协议需在支持列表内，模型 id 不能重复或超长",
+        ),
+      );
+    }
+    // 定义了模型目录就必须有协议：否则 Pi 组不出 provider（内置的协议不会被继承）
+    if (Array.isArray(saved.models) && saved.models.length > 0 && !saved.api) {
+      const derived = this._inferApi(saved.provider);
+      if (derived) {
+        saved = this._providerStore.set(saved.provider, { ...saved, api: derived });
+      } else {
+        this._providerStore.remove(saved.provider);
+        throw new Error(
+          errorMessage(ERROR_CODES.PROVIDER_INVALID, "自定义模型目录时必须指定 API 协议（无法从该提供方推断）"),
+        );
+      }
+    }
+    const report = this._applyProviders();
+    return { ok: true, provider: saved, ...report, note: "新会话生效" };
+  }
+
+  /**
+   * 删除一个提供方定义。**只删 minipi 自己的那份定义**：
+   *   · 内置提供方会回落到 Pi 的原始定义（实测：unregister 只摘覆盖层，模型不丢）；
+   *   · 纯自定义提供方随之消失；
+   *   · `~/.pi/agent/models.json` 与 Pi 的 `auth.json` **一个字节都不动**。
+   * 同时清掉 minipi 自己存的那份凭据（只动 `~/.minipi/credentials.json`）。
+   * @param {{ provider: string }} input
+   */
+  async removeProvider(input) {
+    await this.init();
+    if (!this._providerStore) {
+      throw new Error(errorMessage(ERROR_CODES.INTERNAL, "提供方存储未初始化"));
+    }
+    const providerId = input?.provider;
+    if (typeof providerId !== "string" || providerId.trim().length === 0) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "provider 不能为空"));
+    }
+    const id = providerId.trim();
+    if (!this._providerStore.remove(id)) {
+      throw new Error(errorMessage(ERROR_CODES.PROVIDER_NOT_FOUND, `minipi 里没有 ${id} 的提供方定义`));
+    }
+    try {
+      await this._credentialStore?.delete?.(id);
+    } catch (err) {
+      this._logger.warn?.(`[minipi:pi] 删除 ${id} 的 minipi 凭据失败（不影响定义删除）：${sanitizeDetail(err)}`);
+    }
+    const report = this._applyProviders();
+    return { ok: true, provider: id, ...report, note: "新会话生效" };
+  }
+
+  /** 从运行时的既有模型推断协议（用于「覆盖模型目录但没写协议」时兜底）。 */
+  _inferApi(providerId) {
+    const models = this._modelRuntime?.getModels?.(providerId) ?? [];
+    const api = models.find((m) => typeof m?.api === "string")?.api;
+    return PROVIDER_API_IDS.includes(api) ? api : "";
   }
 
   async setModelApiKey(input) {

@@ -180,8 +180,9 @@ if (!CHROME) {
     })()`);
 
     ok(listSnap.panelVisible === true, "设置面板已打开");
-    ok(listSnap.count === 2, "默认展示 2 张卡片（featured：deepseek + zai）", `实得 ${listSnap.count}`);
+    ok(listSnap.count === 3, "默认展示 3 张卡片（featured 的 deepseek/zai + 自定义的 qa-gateway）", `实得 ${listSnap.count}`);
     ok(listSnap.providers.includes('deepseek'), "deepseek 在默认列表里");
+    ok(listSnap.providers.includes('qa-gateway'), "★ 自定义提供方即使不在 featured 里也会被顶到默认列表");
     ok(!listSnap.providers.includes('openai'), "openai 不在默认列表（折叠了）");
     ok(listSnap.moreHidden === true, "「其他提供方」区域默认收起");
     ok(/添加提供方/.test(listSnap.addLabel), "有「添加提供方」按钮", String(listSnap.addLabel).trim());
@@ -312,6 +313,228 @@ if (!CHROME) {
     })()`);
     ok(emptySave.editorOpenCount === 1, "什么都没填时保存不关编辑器（提示用户）", `实得 ${emptySave.editorOpenCount}`);
     ok(emptySave.imgs === 0, "面板里没有注入出来的 <img> 节点");
+
+    /* ------------------------------------------------------------ B7 */
+    group("[B7] 自定义设置折叠区：API 地址 / 协议 / 模型目录行");
+    await evaluate("window.__minipi.__providerWritesReset()");
+    await evaluate(`document.querySelector('#provList .provCard[data-provider="zai"] [data-prov-edit]').click()`);
+    await sleep(200);
+    const details = await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="zai"]');
+      const det = c.querySelector('details.provDetails');
+      const url = c.querySelector('[data-prov-baseurl]');
+      const api = c.querySelector('[data-prov-api]');
+      const host = c.querySelector('[data-model-host]');
+      return {
+        hasDetails: !!det,
+        summary: det ? det.querySelector('summary').textContent : '',
+        urlPlaceholder: url ? url.placeholder : null,
+        urlValue: url ? url.value : null,
+        apiOptions: api ? [...api.options].map((o) => o.value) : [],
+        apiValue: api ? api.value : null,
+        hostKey: host ? host.getAttribute('data-model-host') : null,
+        rows: c.querySelectorAll('.modelRow').length,
+        emptyHint: !!c.querySelector('.modelRows__empty'),
+        hasDiscover: !!c.querySelector('[data-discover]'),
+        hasAdd: !!c.querySelector('[data-model-add]'),
+      };
+    })()`);
+    ok(details.hasDetails === true, "编辑器里有「自定义设置」折叠区");
+    ok(/自定义设置/.test(details.summary), "折叠区标题正确", details.summary);
+    ok(details.urlPlaceholder === 'https://api.z.ai/api/coding/paas/v4', "API 地址 placeholder = 提供方默认地址", String(details.urlPlaceholder));
+    ok(details.urlValue === '', "未覆盖过的提供方，地址框留空（占位符才是默认值）");
+    ok(details.apiOptions.length === 4, "协议下拉列出 4 个受支持协议", `实得 ${details.apiOptions.length}`);
+    ok(details.apiValue === 'openai-completions', "协议预填该提供方当前协议", String(details.apiValue));
+    ok(details.hostKey === 'zai', "模型目录 host 绑定到该 provider");
+    ok(details.rows === 0 && details.emptyHint === true, "未自定义目录时为空态提示（不预塞内置目录）");
+    ok(details.hasDiscover && details.hasAdd, "目录区有「添加模型」与「获取可用模型」");
+
+    /* ------------------------------------------------------------ B8 */
+    group("[B8] 获取可用模型 → 多选 → 添加所选");
+    await evaluate(`document.querySelector('#provList .provCard[data-provider="zai"] [data-discover]').click()`);
+    await sleep(500);
+    const disc = await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="zai"]');
+      const box = c.querySelector('.discover');
+      const boxes = box ? [...box.querySelectorAll('[data-discover-pick]')] : [];
+      const calls = window.__minipi.__providerWrites();
+      return {
+        items: boxes.length,
+        checked: boxes.filter((b) => b.checked).length,
+        boxHidden: box ? box.hidden : null,
+        calls: calls.filter((x) => x.kind === 'discoverModels'),
+      };
+    })()`);
+    ok(disc.items === 3, "拉到 3 个候选模型", `实得 ${disc.items}`);
+    ok(disc.checked === 3, "默认全部勾选（多数情况就是「都加上」）", `实得 ${disc.checked}`);
+    ok(disc.boxHidden === false, "结果区可见");
+    ok(disc.calls.length === 1, "只发了一次获取请求", `实得 ${disc.calls.length}`);
+    ok(disc.calls[0]?.arg?.baseUrl === 'https://api.z.ai/api/coding/paas/v4', "请求带的是该提供方的地址", String(disc.calls[0]?.arg?.baseUrl));
+    ok(disc.calls[0]?.arg?.provider === 'zai', "请求带上了 provider id");
+
+    // 取消全选 → 只勾一条 → 添加所选
+    await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="zai"]');
+      c.querySelector('[data-discover-all]').click();
+      return true;
+    })()`);
+    await sleep(150);
+    const afterToggle = await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="zai"]');
+      return [...c.querySelectorAll('[data-discover-pick]')].filter((b) => b.checked).length;
+    })()`);
+    ok(afterToggle === 0, "点「全选」是全选/取消的开关（当前全选 → 变全不选）", `实得 ${afterToggle}`);
+
+    await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="zai"]');
+      const box = c.querySelector('.discover');
+      box.querySelector('[data-discover-pick][value="discovered-a"]').checked = true;
+      box.querySelector('[data-discover-pick][value="discovered-a"]').dispatchEvent(new Event('change', { bubbles: true }));
+      box.querySelector('[data-discover-adopt]').click();
+      return true;
+    })()`);
+    await sleep(250);
+    const adopted = await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="zai"]');
+      const ids = [...c.querySelectorAll('[data-model-id]')].map((i) => i.value);
+      return { ids, hasDiscoverBox: !!c.querySelector('.discover:not([hidden])') };
+    })()`);
+    ok(adopted.ids.length === 1 && adopted.ids[0] === 'discovered-a', "只把勾上的那条并进目录", adopted.ids.join(','));
+
+    /* ------------------------------------------------------------ B9 */
+    group("[B9] 保存：提交的提供方定义内容正确");
+    await evaluate("window.__minipi.__providerWritesReset()");
+    await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="zai"]');
+      c.querySelector('[data-prov-baseurl]').value = 'https://my-proxy.local/v1';
+      c.querySelector('[data-prov-baseurl]').dispatchEvent(new Event('input', { bubbles: true }));
+      c.querySelector('[data-prov-save]').click();
+      return true;
+    })()`);
+    await sleep(600);
+    const saved = await evaluate("window.__minipi.__providerWrites()");
+    const setCall = saved.find((x) => x.kind === 'setProvider');
+    ok(Boolean(setCall), "保存时发出了 setProvider");
+    ok(setCall?.arg?.provider === 'zai', "provider 正确", String(setCall?.arg?.provider));
+    ok(setCall?.arg?.definition?.baseUrl === 'https://my-proxy.local/v1', "提交了新填的 API 地址", String(setCall?.arg?.definition?.baseUrl));
+    ok(Array.isArray(setCall?.arg?.definition?.models) && setCall.arg.definition.models.length === 1, "提交了模型目录（1 条）", String(setCall?.arg?.definition?.models?.length));
+    ok(setCall?.arg?.definition?.api === 'openai-completions', "模型目录带了协议（否则 Pi 组不出 provider）", String(setCall?.arg?.definition?.api));
+    ok(!('apiKey' in (setCall?.arg?.definition || {})), "★ 定义里**不含** apiKey（密钥只走 setApiKey）");
+
+    /* ------------------------------------------------------------ B10 */
+    group("[B10] 自定义提供方表单：校验 + 创建");
+    await evaluate("window.__minipi.__providerWritesReset()");
+    await evaluate("document.querySelector('#btnProvCustom').click()");
+    await sleep(250);
+    const form = await evaluate(`(() => {
+      const box = document.querySelector('#provCustomBox');
+      return {
+        hidden: box ? box.hidden : null,
+        hasId: !!box.querySelector('[data-cp-id]'),
+        hasName: !!box.querySelector('[data-cp-name]'),
+        hasUrl: !!box.querySelector('[data-prov-baseurl]'),
+        hasApi: !!box.querySelector('[data-prov-api]'),
+        hasKey: !!box.querySelector('[data-prov-key]'),
+        apiOptions: box.querySelector('[data-prov-api]') ? [...box.querySelector('[data-prov-api]').options].map((o) => o.value) : [],
+        hasCreate: !!box.querySelector('[data-cp-create]'),
+        hasCatalog: !!box.querySelector('[data-model-host]'),
+      };
+    })()`);
+    ok(form.hidden === false, "「+ 添加自定义提供方」展开表单");
+    ok(form.hasId && form.hasName && form.hasUrl && form.hasApi && form.hasKey, "字段齐全（ID/显示名/地址/协议/密钥）");
+    ok(form.apiOptions.length === 4, "协议下拉复用同一份枚举");
+    ok(form.hasCatalog && form.hasCreate, "有模型目录区与「创建提供方」");
+
+    // 非法 id：不发请求
+    await evaluate(`(() => {
+      const b = document.querySelector('#provCustomBox');
+      b.querySelector('[data-cp-id]').value = 'Bad_ID';
+      b.querySelector('[data-prov-baseurl]').value = 'https://x.example/v1';
+      b.querySelector('[data-cp-create]').click();
+      return true;
+    })()`);
+    await sleep(250);
+    let writes = await evaluate("window.__minipi.__providerWrites()");
+    ok(writes.filter((x) => x.kind === 'setProvider').length === 0, "非法 Provider ID 不提交（前端先挡）");
+
+    // 合法 id 但已被占用
+    await evaluate(`(() => {
+      const b = document.querySelector('#provCustomBox');
+      b.querySelector('[data-cp-id]').value = 'zai';
+      b.querySelector('[data-cp-create]').click();
+      return true;
+    })()`);
+    await sleep(250);
+    writes = await evaluate("window.__minipi.__providerWrites()");
+    ok(writes.filter((x) => x.kind === 'setProvider').length === 0, "id 已被占用时不提交");
+
+    // 合法创建：带密钥与模型
+    await evaluate(`(() => {
+      const b = document.querySelector('#provCustomBox');
+      b.querySelector('[data-cp-id]').value = 'qa-new';
+      b.querySelector('[data-cp-name]').value = 'QA New';
+      b.querySelector('[data-prov-baseurl]').value = 'https://new.example/v1';
+      b.querySelector('[data-prov-key]').value = 'sk-QA-NEW-SECRET';
+      const add = b.querySelector('[data-model-add]');
+      add.click();
+      const row = b.querySelector('.modelRow');
+      row.querySelector('[data-model-id]').value = 'new-model-1';
+      row.querySelector('[data-model-name]').value = 'New Model';
+      b.querySelector('[data-cp-create]').click();
+      return true;
+    })()`);
+    await sleep(700);
+    writes = await evaluate("window.__minipi.__providerWrites()");
+    const createCall = writes.find((x) => x.kind === 'setProvider');
+    const keyCall = writes.find((x) => x.kind === 'setApiKey');
+    ok(Boolean(createCall) && createCall.arg.provider === 'qa-new', "合法表单能创建", String(createCall?.arg?.provider));
+    ok(createCall?.arg?.definition?.displayName === 'QA New', "带上显示名");
+    ok(createCall?.arg?.definition?.baseUrl === 'https://new.example/v1', "带上 API 地址");
+    ok(createCall?.arg?.definition?.models?.length === 1 && createCall.arg.definition.models[0].id === 'new-model-1', "带上模型目录");
+    ok(!('apiKey' in (createCall?.arg?.definition || {})), "★ 自定义定义里也不含 apiKey");
+    ok(Boolean(keyCall) && keyCall.arg.providerId === 'qa-new', "密钥单独走 setApiKey");
+
+    /* ------------------------------------------------------------ B11 */
+    group("[B11] 删除定义：两步确认 + 不误删内置");
+    await evaluate("window.__minipi.__providerWritesReset()");
+    const hasRemove = await evaluate(`(() => {
+      const cz = document.querySelector('#provList .provCard[data-provider="zai"]');
+      const cq = document.querySelector('#provList .provCard[data-provider="qa-gateway"]');
+      const cd = document.querySelector('#provList .provCard[data-provider="deepseek"]');
+      return {
+        zai: cz ? !!cz.querySelector('[data-prov-remove]') : null,
+        zaiLabel: cz && cz.querySelector('[data-prov-remove]') ? cz.querySelector('[data-prov-remove]').textContent : null,
+        custom: cq ? !!cq.querySelector('[data-prov-remove]') : null,
+        customLabel: cq && cq.querySelector('[data-prov-remove]') ? cq.querySelector('[data-prov-remove]').textContent : null,
+        deepseek: cd ? !!cd.querySelector('[data-prov-remove]') : null,
+      };
+    })()`);
+    ok(hasRemove.deepseek === false, "没被 minipi 改过的内置提供方**没有**删除按钮");
+    ok(hasRemove.customLabel === '删除提供方', "自定义提供方的按钮是「删除提供方」", String(hasRemove.customLabel));
+
+    // 展开 qa-gateway 再点删除 → 进入二次确认；此时**不能**发删除请求
+    await evaluate(`document.querySelector('#provList .provCard[data-provider="qa-gateway"] [data-prov-edit]').click()`);
+    await sleep(200);
+    await evaluate(`document.querySelector('#provList .provCard[data-provider="qa-gateway"] [data-prov-remove]').click()`);
+    await sleep(250);
+    const confirmState = await evaluate(`(() => {
+      const c = document.querySelector('#provList .provCard[data-provider="qa-gateway"]');
+      const writes = window.__minipi.__providerWrites();
+      return {
+        hasConfirm: !!c.querySelector('[data-prov-remove-confirm]'),
+        confirmLabel: c.querySelector('[data-prov-remove-confirm]') ? c.querySelector('[data-prov-remove-confirm]').textContent : null,
+        removes: writes.filter((x) => x.kind === 'removeProvider').length,
+      };
+    })()`);
+    ok(confirmState.hasConfirm === true, "第一次点删除只进入二次确认");
+    ok(confirmState.confirmLabel === '确认删除', "确认为「确认删除」", String(confirmState.confirmLabel));
+    ok(confirmState.removes === 0, "★ 未确认前**不**发删除请求");
+
+    await evaluate(`document.querySelector('#provList .provCard[data-provider="qa-gateway"] [data-prov-remove-confirm]').click()`);
+    await sleep(600);
+    const removed = await evaluate("window.__minipi.__providerWrites()");
+    const rmCall = removed.find((x) => x.kind === 'removeProvider');
+    ok(Boolean(rmCall) && rmCall.arg.provider === 'qa-gateway', "确认后才真的删除", String(rmCall?.arg?.provider));
   } catch (err) {
     ok(false, `headless 断言执行异常：${err?.message ?? err}`);
   } finally {

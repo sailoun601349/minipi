@@ -647,6 +647,39 @@ kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); ba
 .provAdd{margin-top:10px}
 .provAdd__toggle{width:100%;height:38px;border:1px dashed var(--border-strong);border-radius:12px}
 .provMore{margin-top:8px}
+
+/* ---- 模型设置第二批：自定义设置折叠区 / 模型目录行 / 拉取模型 / 自定义提供方表单 ---- */
+.provAddRow{display:flex;gap:8px;margin-top:10px}
+.provAddRow .provAdd__toggle{flex:1;min-width:0}
+.provCard__foot{display:flex;justify-content:flex-end;gap:6px;border-top:1px dashed var(--border);padding-top:8px}
+.provCard__danger{color:#ff9d96}
+/* 折叠区「自定义设置」 */
+.provDetails{border-top:1px dashed var(--border);padding-top:9px}
+.provDetails__summary{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;cursor:pointer;color:var(--text-2);min-width:0}
+.provDetails__summary::before{content:'';flex-shrink:0;width:5px;height:5px;border-bottom:1.5px solid currentColor;border-right:1.5px solid currentColor;transform:rotate(-45deg) translate(-1px,-1px);transition:transform .12s}
+.provDetails[open]>.provDetails__summary::before{transform:rotate(45deg) translate(-1px,-1px)}
+.provDetails__body{display:flex;flex-direction:column;gap:9px;padding-top:9px}
+.provDetails__meta{margin-left:auto;flex-shrink:0;font-size:10px;color:var(--muted)}
+/* 模型目录行编辑 */
+.modelCatalog{display:flex;flex-direction:column;gap:6px}
+.modelRows__list{display:flex;flex-direction:column;gap:5px}
+.modelRow{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) auto;gap:5px;align-items:center}
+.modelRow input{min-width:0;font-family:var(--mono);font-size:11px;padding:5px 7px}
+.modelRow__del{flex-shrink:0;padding:4px 8px}
+.modelRows__bar{display:flex;gap:6px;flex-wrap:wrap}
+.modelRows__empty{border:1px dashed var(--border-strong);border-radius:8px;padding:9px;text-align:center;font-size:10.5px;color:var(--muted);line-height:1.5}
+/* 获取可用模型的结果区 */
+.discover{border:1px solid var(--border);border-radius:9px;padding:9px;background:rgba(255,255,255,.02)}
+.discover__err{color:#ff9d96}
+.discover__list{max-height:170px;overflow:auto;display:flex;flex-direction:column;gap:3px;margin:6px 0}
+.discover__item{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:var(--text-2);font-family:var(--mono);word-break:break-all;cursor:pointer}
+.discover__item input{flex-shrink:0;margin-top:2px}
+.discover__bar{display:flex;gap:6px;flex-wrap:wrap}
+/* 自定义提供方表单 */
+.provCustom{margin-top:10px}
+.provCustom__card{border:1px solid var(--border);border-radius:12px;padding:11px 13px;display:flex;flex-direction:column;gap:9px;background:rgba(255,255,255,.02)}
+.provCustom__title{font-size:12.5px;font-weight:600}
+.provCustom__hint{font-size:10.5px;color:var(--muted);line-height:1.55}
 </style>
 </head>
 <body data-mode="ball">
@@ -808,10 +841,12 @@ kbd{ font-size:10px; padding:1px 4px; border-radius:4px; color:var(--text-2); ba
     <p class="settingsPanel__intro">填入各提供方的 API 密钥即可使用其模型。模型选择只对新建会话生效，当前会话不会被重建。</p>
     <div class="settingsPanel__current" id="modelCurrent">正在读取模型目录…</div>
     <ul class="provList" id="provList"></ul>
-    <div class="provAdd">
+    <div class="provAddRow">
       <button class="btn btn--ghost provAdd__toggle" type="button" id="btnProvAdd">+ 添加提供方</button>
+      <button class="btn btn--ghost provAdd__toggle" type="button" id="btnProvCustom">+ 添加自定义提供方</button>
     </div>
     <ul class="provList" id="provMore" hidden></ul>
+    <div class="provCustom" id="provCustomBox" hidden aria-label="添加自定义提供方"></div>
     <div class="settingsPanel__note" id="settingsStatus" aria-live="polite"></div>
   </section>
 </div>
@@ -967,6 +1002,21 @@ const APPROVAL_KIND_LABEL = Object.freeze({
   command: '执行命令',
 });
 
+/* ---- 提供方协议枚举（逐字对齐 protocol.js 的 PROVIDER_API_IDS）----
+   ⚠ 这是**白名单**不是建议列表：写进 registerProvider 的 api 必须是这四个之一。
+     改 protocol.js 那份时必须同步改这里（`qa:model-panel` 有比对门禁）。 */
+const PROVIDER_API_IDS = Object.freeze([
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages',
+  'google-generative-ai',
+]);
+/** Provider ID 形态：小写字母开头，只含 [a-z0-9-]。 */
+const PROVIDER_ID_RE = /^[a-z][a-z0-9-]*$/;
+/** 自定义提供方里这些键是**不支持的**（密钥只走 setApiKey，绝不进 providers.json）。 */
+const PROVIDER_FORBIDDEN_INPUT_KEYS = Object.freeze(['apiKey', 'key', 'token']);
+const PROVIDER_MODEL_ROW_MAX = 80;
+
 /* ---- 工具调用标记识别（逐字对齐 protocol.js 的 splitToolMarkup / LIMITS，见 §8b） ----
    ⚠ 为什么要有这份镜像：`quick` 场景 `noTools: "all"`，模型手里没有工具，却会把
      Anthropic 风格的工具调用语法**当正文写出来**（`<invoke name="cmd"><parameter …>`）。
@@ -1049,6 +1099,9 @@ const ERROR_CODES = Object.freeze({
   /* 沙箱拦截（v0.4，protocol.js 同步）—— 缺了它会被 parseErrorMessage 降级成 INTERNAL，错误归类错 */
   SANDBOX_DENIED: 'SANDBOX_DENIED',
   MODEL_NOT_FOUND: 'MODEL_NOT_FOUND',
+  PROVIDER_NOT_FOUND: 'PROVIDER_NOT_FOUND',
+  PROVIDER_INVALID: 'PROVIDER_INVALID',
+  DISCOVER_FAILED: 'DISCOVER_FAILED',
   /* M4 审批闸门（审批设计 §9.1 / §5；protocol.js 同步）—— 同理会降级成 INTERNAL，必须镜像 */
   APPROVAL_TIMEOUT: 'APPROVAL_TIMEOUT',
   APPROVAL_DENIED: 'APPROVAL_DENIED',
@@ -3111,13 +3164,30 @@ async function generateOutcomeFromComposer() {
  *      都来自 Pi 运行时的外部数据，不该进 HTML 解析器。
  * ========================================================================== */
 
-/** 面板数据缓存；`openEditors` 记录哪些卡片当前展开着编辑器（重渲染不丢）。 */
+/** 「添加自定义提供方」表单的 scopeKey；与真实 provider id 不会撞（id 不许下划线开头）。 */
+const CUSTOM_SCOPE = '__new__';
+
+/**
+ * 面板数据缓存。
+ *
+ * · `openEditors` —— 哪些卡片当前展开着编辑器（重渲染不丢）；
+ * · `drafts` —— **未保存的输入草稿**（scopeKey → { baseUrl, api, apiKey, models }）。
+ *   存在的唯一理由：点「获取可用模型」会触发重绘，不抓草稿的话用户刚敲进去的字全没了。
+ *   ⚠ 草稿里的 `apiKey` 只在内存里躺着（和它已经在 DOM 里等价），绝不落盘、绝不进日志。
+ * · `discover` —— 「获取可用模型」的一次性结果（同一时刻只允许一个 scope 在拉）。
+ * · `pendingRemove` —— 删除的二次确认态（做成两步点击，不用 window.confirm：
+ *   原生弹窗在 headless 环境下会被直接吞掉、没法自动化验收）。
+ */
 const modelPanel = {
   providers: [],
   current: null,
   defaultModel: null,
   openEditors: new Set(),
   showMore: false,
+  drafts: new Map(),
+  customOpen: false,
+  discover: null,
+  pendingRemove: null,
 };
 
 /** 当前生效的模型：显式偏好优先，否则就是默认。 */
@@ -3140,15 +3210,243 @@ function modelLabel(pref) {
   return `${row ? p_display(row) : pref.provider} / ${(model && model.name) || pref.modelId}`;
 }
 
-/** 卡片第二行的小字：配置状态 + 是否是当前模型。 */
+/** 卡片第二行的小字：配置状态 + 是否是当前模型 + 有没有被 minipi 改过。 */
 function providerMetaText(p) {
   const parts = [p.configured ? 'API 密钥已配置' : '未配置 API 密钥'];
-  if (p.provider === 'deepseek' && !p.configured) parts.push('DeepSeek 需要密钥');
   const inUse = effectiveModel() && effectiveModel().provider === p.provider;
   if (inUse) parts.push(`当前模型：${modelLabel(effectiveModel())}`);
   const count = Array.isArray(p.models) ? p.models.length : 0;
   if (count > 0) parts.push(`${count} 个模型`);
+  if (p.custom) parts.push('minipi 自定义');
+  else if (p.modelsEdited) parts.push('模型目录已自定义');
+  else if (p.edited) parts.push('API 地址已覆盖');
   return parts.join(' · ');
+}
+
+/* ---------------------------------------------------------------------------
+ * 编辑器 scope 的读写：卡片与「自定义提供方」表单共用同一套字段属性名
+ * （`data-prov-baseurl` / `data-prov-api` / `data-prov-key` / `data-model-host`），
+ * 这样 captureEdits / readScope 一份代码覆盖两种界面，不必写两遍。
+ * ------------------------------------------------------------------------- */
+
+/** 按 scopeKey 找容器。**不用拼选择器**（provider id 来自运行时，可能含特殊字符）。 */
+function scopeEl(scopeKey) {
+  if (scopeKey === CUSTOM_SCOPE) return $('#provCustomBox');
+  for (const card of document.querySelectorAll('#settingsPanel .provCard')) {
+    if (card.getAttribute('data-provider') === scopeKey) return card;
+  }
+  return null;
+}
+
+/** 读取某个 scope 当前的字段值 + 模型行。 */
+function readScope(scopeKey) {
+  const scope = scopeEl(scopeKey);
+  if (!scope) return null;
+  const baseUrl = scope.querySelector('[data-prov-baseurl]');
+  const api = scope.querySelector('[data-prov-api]');
+  const keyInput = scope.querySelector('[data-prov-key]');
+  const idEl = scope.querySelector('[data-cp-id]');
+  const nameEl = scope.querySelector('[data-cp-name]');
+  return {
+    baseUrl: baseUrl ? String(baseUrl.value || '').trim() : '',
+    api: api ? String(api.value || '') : '',
+    apiKey: keyInput ? String(keyInput.value || '') : '',
+    models: readModelRows(scope),
+    customId: idEl ? String(idEl.value || '').trim() : '',
+    customName: nameEl ? String(nameEl.value || '').trim() : '',
+  };
+}
+
+/** 重绘前把当前所有编辑器里的字抓进 drafts。 */
+function captureEdits() {
+  for (const scope of document.querySelectorAll('#settingsPanel [data-model-host]')) {
+    const key = scope.getAttribute('data-model-host');
+    if (!key) continue;
+    const snap = readScope(key);
+    if (snap) modelPanel.drafts.set(key, snap);
+  }
+}
+
+/** 取某个 scope 的草稿；没有就返回 fallback。 */
+function draftFor(scopeKey) {
+  return modelPanel.drafts.get(scopeKey) || null;
+}
+
+/* ---------------------------------------------------------------------------
+ * 模型目录行编辑
+ * ------------------------------------------------------------------------- */
+
+function buildModelRow(row) {
+  const wrap = el('div', 'modelRow');
+  const id = el('input');
+  id.type = 'text';
+  id.placeholder = '模型 ID';
+  id.value = row && row.id ? row.id : '';
+  id.setAttribute('data-model-id', '1');
+  const name = el('input');
+  name.type = 'text';
+  name.placeholder = '显示名（可空）';
+  name.value = row && row.name ? row.name : '';
+  name.setAttribute('data-model-name', '1');
+  const del = el('button', 'btn btn--ghost btn--sm modelRow__del', '删除');
+  del.type = 'button';
+  del.setAttribute('data-model-del', '1');
+  wrap.appendChild(id);
+  wrap.appendChild(name);
+  wrap.appendChild(del);
+  return wrap;
+}
+
+/** 读回某个 scope 里所有模型行（空 id 的行直接忽略 —— 半途敲的行不该拦住保存）。 */
+function readModelRows(scope) {
+  const out = [];
+  for (const row of scope.querySelectorAll('.modelRow')) {
+    const idEl = row.querySelector('[data-model-id]');
+    const nameEl = row.querySelector('[data-model-name]');
+    const id = idEl ? String(idEl.value || '').trim() : '';
+    if (!id) continue;
+    const name = nameEl ? String(nameEl.value || '').trim() : '';
+    out.push(name ? { id, name } : { id });
+  }
+  return out;
+}
+
+/**
+ * 模型目录编辑区（行列表 + 添加/获取按钮 + 结果区）。
+ * @param {string} scopeKey
+ * @param {object[]} rows 初值
+ * @param {{ modelsEdited?: boolean, custom?: boolean }} [meta]
+ */
+function buildModelCatalogHost(scopeKey, rows, meta = {}) {
+  const host = el('div', 'modelCatalog');
+  host.setAttribute('data-model-host', scopeKey);
+
+  const head = el('div', 'provCard__hint');
+  head.textContent = meta.modelsEdited
+    ? '已自定义模型目录（保存后按这份清单生效）'
+    : '留空即沿用该提供方的默认模型目录';
+  host.appendChild(head);
+
+  const list = el('div', 'modelRows__list');
+  if (rows.length === 0) {
+    list.appendChild(el('div', 'modelRows__empty', '还没有自定义模型。点「添加模型」手填，或点「获取可用模型」从提供方拉一份。'));
+  } else {
+    for (const r of rows) list.appendChild(buildModelRow(r));
+  }
+  host.appendChild(list);
+
+  const bar = el('div', 'modelRows__bar');
+  const add = el('button', 'btn btn--ghost btn--sm', '+ 添加模型');
+  add.type = 'button';
+  add.setAttribute('data-model-add', '1');
+  bar.appendChild(add);
+
+  const discovering = modelPanel.discover && modelPanel.discover.scopeKey === scopeKey && modelPanel.discover.loading;
+  const discover = el('button', 'btn btn--ghost btn--sm', discovering ? '正在询问提供方…' : '获取可用模型');
+  discover.type = 'button';
+  discover.setAttribute('data-discover', '1');
+  discover.disabled = Boolean(discovering);
+  bar.appendChild(discover);
+
+  if (meta.modelsEdited) {
+    const reset = el('button', 'btn btn--ghost btn--sm', '恢复默认模型目录');
+    reset.type = 'button';
+    reset.setAttribute('data-models-reset', '1');
+    bar.appendChild(reset);
+  }
+  host.appendChild(bar);
+  host.appendChild(buildDiscoverBox(scopeKey));
+  return host;
+}
+
+/** 「获取可用模型」的结果区（多选 + 添加所选）。 */
+function buildDiscoverBox(scopeKey) {
+  const box = el('div', 'discover');
+  const d = modelPanel.discover;
+  if (!d || d.scopeKey !== scopeKey) {
+    box.hidden = true;
+    return box;
+  }
+  if (d.loading) {
+    box.appendChild(el('div', 'provCard__hint', '正在向提供方询问模型清单…'));
+    return box;
+  }
+  if (d.error) {
+    box.appendChild(el('div', 'provCard__hint discover__err', `获取失败：${d.error}`));
+    const bar = el('div', 'discover__bar');
+    const close = el('button', 'btn btn--ghost btn--sm', '关闭');
+    close.type = 'button';
+    close.setAttribute('data-discover-close', '1');
+    bar.appendChild(close);
+    box.appendChild(bar);
+    return box;
+  }
+  if (!Array.isArray(d.models) || d.models.length === 0) {
+    box.hidden = true;
+    return box;
+  }
+
+  box.appendChild(el('div', 'provCard__hint', `拉到 ${d.models.length} 个模型，勾选后点「添加所选」：`));
+  const list = el('div', 'discover__list');
+  for (const m of d.models) {
+    const label = el('label', 'discover__item');
+    const cb = el('input');
+    cb.type = 'checkbox';
+    cb.value = m.modelId;
+    cb.checked = d.picked.has(m.modelId);
+    cb.setAttribute('data-discover-pick', '1');
+    label.appendChild(cb);
+    label.appendChild(el('span', null, m.name && m.name !== m.modelId ? `${m.name}（${m.modelId}）` : m.modelId));
+    list.appendChild(label);
+  }
+  box.appendChild(list);
+
+  const bar = el('div', 'discover__bar');
+  const all = el('button', 'btn btn--ghost btn--sm', '全选');
+  all.type = 'button';
+  all.setAttribute('data-discover-all', '1');
+  const adopt = el('button', 'btn btn--primary btn--sm', '添加所选');
+  adopt.type = 'button';
+  adopt.setAttribute('data-discover-adopt', '1');
+  const close = el('button', 'btn btn--ghost btn--sm', '关闭');
+  close.type = 'button';
+  close.setAttribute('data-discover-close', '1');
+  bar.appendChild(all);
+  bar.appendChild(adopt);
+  bar.appendChild(close);
+  box.appendChild(bar);
+  return box;
+}
+
+/** API 地址 + 协议两个字段（卡片与自定义表单共用）。 */
+function buildConnectionFields(scopeKey, draft, fallbackBaseUrl, fallbackApi) {
+  const frag = document.createDocumentFragment();
+
+  const urlField = el('label', 'provField');
+  urlField.appendChild(el('span', null, 'API 地址'));
+  const urlInput = el('input');
+  urlInput.type = 'text';
+  urlInput.autocomplete = 'off';
+  urlInput.placeholder = fallbackBaseUrl || '提供方默认';
+  urlInput.value = draft ? draft.baseUrl : '';
+  urlInput.setAttribute('data-prov-baseurl', '1');
+  urlField.appendChild(urlInput);
+  frag.appendChild(urlField);
+
+  const apiField = el('label', 'provField');
+  apiField.appendChild(el('span', null, 'API 协议'));
+  const apiSelect = el('select');
+  apiSelect.setAttribute('data-prov-api', '1');
+  const wanted = (draft && draft.api) || fallbackApi || PROVIDER_API_IDS[0];
+  for (const api of PROVIDER_API_IDS) {
+    const opt = el('option', null, api);
+    opt.value = api;
+    if (api === wanted) opt.selected = true;
+    apiSelect.appendChild(opt);
+  }
+  apiField.appendChild(apiSelect);
+  frag.appendChild(apiField);
+  return frag;
 }
 
 /** 一张提供方卡片。 */
@@ -3159,11 +3457,30 @@ function buildProviderCard(p) {
   const head = el('div', 'provCard__head');
   head.appendChild(el('span', 'provCard__name', p_display(p)));
   head.appendChild(el('span', 'provCard__tag', p.provider));
+  if (p.custom) head.appendChild(el('span', 'provCard__tag', '自定义'));
+  else if (p.edited) head.appendChild(el('span', 'provCard__tag', '已覆盖'));
   const dot = el('span', p.configured ? 'provDot provDot--on' : 'provDot provDot--off');
   dot.title = p.configured ? 'API 密钥已配置' : 'API 密钥缺失';
   dot.setAttribute('role', 'img');
   dot.setAttribute('aria-label', dot.title);
   head.appendChild(dot);
+  // 删除 / 移除覆盖：放在**行头**（收起状态也看得见），与 harness 的行级动作布局一致。
+  // 两步确认：第一次点只切进 pendingRemove，不直接删。
+  if (modelPanel.pendingRemove === p.provider) {
+    const no = el('button', 'btn btn--ghost btn--sm', '取消');
+    no.type = 'button';
+    no.setAttribute('data-prov-remove-cancel', String(p.provider));
+    const yes = el('button', 'btn btn--sm provCard__danger', '确认删除');
+    yes.type = 'button';
+    yes.setAttribute('data-prov-remove-confirm', String(p.provider));
+    head.appendChild(no);
+    head.appendChild(yes);
+  } else if (p.edited) {
+    const rm = el('button', 'btn btn--ghost btn--sm provCard__danger', p.custom ? '删除提供方' : '移除覆盖');
+    rm.type = 'button';
+    rm.setAttribute('data-prov-remove', String(p.provider));
+    head.appendChild(rm);
+  }
   const edit = el('button', 'btn btn--ghost btn--sm provCard__edit', modelPanel.openEditors.has(p.provider) ? '收起' : '编辑');
   edit.type = 'button';
   edit.setAttribute('data-prov-edit', String(p.provider));
@@ -3174,6 +3491,8 @@ function buildProviderCard(p) {
 
   if (!modelPanel.openEditors.has(p.provider)) return card;
 
+  // 草稿优先：点过「获取可用模型」之后重绘，用户已经敲的字不能丢
+  const draft = draftFor(p.provider);
   const editor = el('div', 'provCard__editor');
 
   const keyField = el('label', 'provField');
@@ -3182,13 +3501,14 @@ function buildProviderCard(p) {
   keyInput.type = 'password';
   keyInput.autocomplete = 'off';
   keyInput.placeholder = p.configured ? '留空则保持不变' : '粘贴 API 密钥';
+  keyInput.value = draft ? draft.apiKey : '';
   keyInput.setAttribute('data-prov-key', String(p.provider));
   keyField.appendChild(keyInput);
   editor.appendChild(keyField);
 
   if (Array.isArray(p.models) && p.models.length > 0) {
     const modelField = el('label', 'provField');
-    modelField.appendChild(el('span', null, '模型'));
+    modelField.appendChild(el('span', null, '默认用哪个模型'));
     const select = el('select');
     select.setAttribute('data-prov-model', String(p.provider));
     const cur = effectiveModel();
@@ -3207,16 +3527,29 @@ function buildProviderCard(p) {
     editor.appendChild(el('div', 'provCard__hint', '该提供方没有内置模型目录，填入密钥后可用的模型由服务端决定。'));
   }
 
-  editor.appendChild(
+  /* ---- 折叠区：自定义设置（API 地址 / 协议 / 模型目录）---- */
+  const details = el('details', 'provDetails');
+  const summary = el('summary', 'provDetails__summary');
+  summary.appendChild(el('span', null, '自定义设置'));
+  summary.appendChild(el('span', 'provDetails__meta', p.modelsEdited ? '模型目录已自定义' : '正在使用默认模型目录'));
+  details.appendChild(summary);
+  const detailsBody = el('div', 'provDetails__body');
+  detailsBody.appendChild(buildConnectionFields(p.provider, draft, p.baseUrl, p.api));
+  const rowsFromDraft = draft && Array.isArray(draft.models) ? draft.models : null;
+  const rows = rowsFromDraft || (p.modelsEdited ? p.models.map((m) => ({ id: m.modelId, name: m.name })) : []);
+  detailsBody.appendChild(buildModelCatalogHost(p.provider, rows, { modelsEdited: p.modelsEdited }));
+  detailsBody.appendChild(
     el(
       'div',
       'provCard__hint',
-      p.configured
-        ? '密钥保存在 ~/.minipi/credentials.json，不会回显、不会写进日志。'
-        : '还没配密钥：填上密钥才能用这个提供方的模型。密钥只写不读。',
+      'API 地址留空 = 用提供方默认。模型目录留空 = 沿用默认目录。密钥只写不读，存在 ~/.minipi/credentials.json。',
     ),
   );
+  details.appendChild(detailsBody); // ⚠ 别漏：漏了就只有标题、字段全不见（已踩过一次）
+  if (draft) details.open = true;
+  editor.appendChild(details);
 
+  /* ---- 底部动作 ---- */
   const actions = el('div', 'provCard__actions');
   const cancel = el('button', 'btn btn--sm', '取消');
   cancel.type = 'button';
@@ -3231,15 +3564,81 @@ function buildProviderCard(p) {
   return card;
 }
 
-/** 重绘提供方列表（featured 全列 + 其余折叠）。 */
+/** 「添加自定义提供方」表单（字段属性名与卡片一致，读写复用同一套）。 */
+function buildCustomForm() {
+  const box = $('#provCustomBox');
+  if (!box) return;
+  box.hidden = !modelPanel.customOpen;
+  box.textContent = '';
+  if (!modelPanel.customOpen) return;
+
+  const draft = draftFor(CUSTOM_SCOPE) || { baseUrl: '', api: PROVIDER_API_IDS[0], apiKey: '', models: [] };
+  const card = el('div', 'provCustom__card');
+  card.appendChild(el('div', 'provCustom__title', '自定义提供方'));
+
+  const idField = el('label', 'provField');
+  idField.appendChild(el('span', null, 'Provider ID'));
+  const idInput = el('input');
+  idInput.type = 'text';
+  idInput.autocomplete = 'off';
+  idInput.placeholder = 'acme-gateway';
+  idInput.value = draft.customId || '';
+  idInput.setAttribute('data-cp-id', '1');
+  idField.appendChild(idInput);
+  idField.appendChild(
+    el('div', 'provCustom__hint', '小写字母开头，只含 a-z 0-9 和短横线；这个标识会出现在模型名里（provider/model）。'),
+  );
+  card.appendChild(idField);
+
+  const nameField = el('label', 'provField');
+  nameField.appendChild(el('span', null, '显示名称'));
+  const nameInput = el('input');
+  nameInput.type = 'text';
+  nameInput.autocomplete = 'off';
+  nameInput.placeholder = '留空则用 Provider ID';
+  nameInput.value = draft.customName || '';
+  nameInput.setAttribute('data-cp-name', '1');
+  nameField.appendChild(nameInput);
+  card.appendChild(nameField);
+
+  card.appendChild(buildConnectionFields(CUSTOM_SCOPE, draft, '', draft.api));
+
+  const keyField = el('label', 'provField');
+  keyField.appendChild(el('span', null, 'API 密钥'));
+  const keyInput = el('input');
+  keyInput.type = 'password';
+  keyInput.autocomplete = 'off';
+  keyInput.placeholder = '输入 API 密钥，或留空沿用已有认证';
+  keyInput.value = draft.apiKey || '';
+  keyInput.setAttribute('data-prov-key', CUSTOM_SCOPE);
+  keyField.appendChild(keyInput);
+  card.appendChild(keyField);
+
+  card.appendChild(buildModelCatalogHost(CUSTOM_SCOPE, Array.isArray(draft.models) ? draft.models : [], {}));
+
+  const actions = el('div', 'provCard__actions');
+  const cancel = el('button', 'btn btn--sm', '取消');
+  cancel.type = 'button';
+  cancel.setAttribute('data-cp-cancel', '1');
+  const create = el('button', 'btn btn--primary btn--sm', '创建提供方');
+  create.type = 'button';
+  create.setAttribute('data-cp-create', '1');
+  actions.appendChild(cancel);
+  actions.appendChild(create);
+  card.appendChild(actions);
+
+  box.appendChild(card);
+}
+
+/** 重绘提供方列表（featured 全列 + 其余折叠 + 自定义表单）。 */
 function renderProviderList() {
   const list = $('#provList');
   const more = $('#provMore');
   if (!list) return;
 
   const all = modelPanel.providers;
-  const featured = all.filter((p) => p.featured || p.configured);
-  const rest = all.filter((p) => !p.featured && !p.configured);
+  const featured = all.filter((p) => p.featured || p.configured || p.custom || p.edited);
+  const rest = all.filter((p) => !p.featured && !p.configured && !p.custom && !p.edited);
 
   list.textContent = '';
   for (const p of featured) list.appendChild(buildProviderCard(p));
@@ -3254,6 +3653,9 @@ function renderProviderList() {
     addBtn.textContent = modelPanel.showMore ? '收起其他提供方' : `+ 添加提供方（${rest.length}）`;
     addBtn.disabled = rest.length === 0;
   }
+  const customBtn = $('#btnProvCustom');
+  if (customBtn) customBtn.textContent = modelPanel.customOpen ? '收起自定义提供方' : '+ 添加自定义提供方';
+  buildCustomForm();
 }
 
 /** 顶部「当前模型」一行。 */
@@ -3297,28 +3699,68 @@ async function openSettingsPanel() {
   panel.hidden = false;
   modelPanel.showMore = false;
   modelPanel.openEditors.clear();
+  modelPanel.drafts.clear();
+  modelPanel.customOpen = false;
+  modelPanel.discover = null;
+  modelPanel.pendingRemove = null;
   try {
     await loadModelPanel();
   } catch (err) {
     const status = $('#settingsStatus');
     if (status) status.textContent = `读取提供方失败：${parseErrorMessage(err).detail}`;
   }
+  renderProviderList();
 }
 
-/** 保存一张卡片：有 key 就存 key，模型**确实被改过**才存偏好；两者可单独生效。 */
+/** 两个模型集合是否等价（只看 id + 名称）——用来判断「用户有没有真的动过模型目录」。 */
+function sameModelSet(a, b) {
+  const norm = (arr) =>
+    (Array.isArray(arr) ? arr : [])
+      .map((m) => `${m.id || m.modelId || ''}\u0000${m.name || ''}`)
+      .sort()
+      .join('\u0001');
+  return norm(a) === norm(b);
+}
+
+/**
+ * 保存一张卡片。三件事各自独立生效，**只提交真正改过的东西**：
+ *   ① API 密钥 → setApiKey（永远只写不读）
+ *   ② 默认模型 → setModel（只在该选择器确实被改动时）
+ *   ③ 提供方定义 → setProvider（API 地址 / 协议 / 模型目录）
+ */
 async function saveProviderCard(providerId) {
-  const card = document.querySelector(`.provCard[data-provider="${providerId}"]`);
-  if (!card) return;
-  const keyInput = card.querySelector('[data-prov-key]');
-  const modelSelect = card.querySelector('[data-prov-model]');
-  const apiKey = keyInput ? keyInput.value : '';
+  const scope = readScope(providerId);
+  if (!scope) return;
+  const card = scopeEl(providerId);
+  const p = modelPanel.providers.find((x) => x.provider === providerId) || null;
+  const modelSelect = card ? card.querySelector('[data-prov-model]') : null;
+
+  const apiKey = scope.apiKey;
   const initial = modelSelect ? String(modelSelect.getAttribute('data-prov-initial') || '') : '';
   const picked = modelSelect ? String(modelSelect.value || '') : '';
   const modelChanged = Boolean(modelSelect) && picked !== '' && picked !== initial;
-  if (!apiKey && !modelChanged) {
+
+  /** 要提交的提供方定义（空对象 = 不改定义）。 */
+  const def = {};
+  const curBaseUrl = p && typeof p.baseUrl === 'string' ? p.baseUrl : '';
+  if (scope.baseUrl && scope.baseUrl !== curBaseUrl) def.baseUrl = scope.baseUrl;
+  if (scope.models.length > 0) {
+    // 模型目录必须有协议：否则 Pi 组不出 provider（内置的协议不会被继承）
+    if (!sameModelSet(scope.models, p && p.modelsEdited ? p.models : [])) {
+      def.models = scope.models;
+      def.api = scope.api || (p && p.api) || PROVIDER_API_IDS[0];
+    }
+  } else if (scope.api && scope.api !== String((p && p.api) || '')) {
+    def.api = scope.api;
+  }
+  const hasDef = Object.keys(def).length > 0;
+
+  if (!apiKey && !modelChanged && !hasDef) {
     toast('没有要保存的内容', 'warn');
     return;
   }
+
+  const keyInput = card ? card.querySelector('[data-prov-key]') : null;
   const done = [];
   try {
     if (apiKey) {
@@ -3328,7 +3770,11 @@ async function saveProviderCard(providerId) {
     }
     if (modelChanged) {
       await host.setModel({ model: { provider: providerId, modelId: picked } });
-      done.push(`模型 ${picked}`);
+      done.push(`默认模型 ${picked}`);
+    }
+    if (hasDef) {
+      await host.setProvider({ provider: providerId, definition: def });
+      done.push(def.models ? `模型目录（${def.models.length} 条）` : 'API 地址 / 协议');
     }
   } catch (err) {
     if (keyInput) keyInput.value = '';
@@ -3337,12 +3783,162 @@ async function saveProviderCard(providerId) {
   }
   toast(`已保存 ${done.join(' · ')}`);
   modelPanel.openEditors.delete(providerId);
+  modelPanel.pendingRemove = null;
+  modelPanel.drafts.delete(providerId);
+  await refreshModelPanel();
+}
+
+/** 「恢复默认模型目录」：只摘掉模型目录覆盖，保住 API 地址覆盖。 */
+async function resetProviderModels(providerId) {
+  const p = modelPanel.providers.find((x) => x.provider === providerId);
+  if (!p) return;
+  const def = { api: p.api || PROVIDER_API_IDS[0], models: null };
+  if (p.hasBaseUrlOverride) def.baseUrl = p.baseUrl;
+  try {
+    await host.setProvider({ provider: providerId, definition: def });
+    toast('已恢复默认模型目录');
+    modelPanel.drafts.delete(providerId);
+    await refreshModelPanel();
+  } catch (err) {
+    toast(`恢复失败：${parseErrorMessage(err).detail}`, 'err');
+  }
+}
+
+/** 删除一条提供方定义（自定义提供方 or 对内置的覆盖），两步确认。 */
+async function removeProviderDefinition(providerId) {
+  try {
+    const res = await host.removeProvider({ provider: providerId });
+    const removed = Array.isArray(res?.removed) ? res.removed.length : 0;
+    toast(removed > 0 ? '已删除定义，提供方已回落默认' : '已删除定义');
+    modelPanel.pendingRemove = null;
+    modelPanel.openEditors.delete(providerId);
+    modelPanel.drafts.delete(providerId);
+    await refreshModelPanel();
+  } catch (err) {
+    toast(`删除失败：${parseErrorMessage(err).detail}`, 'err');
+  }
+}
+
+/** 「获取可用模型」：拉一次清单，结果放进 modelPanel.discover，重绘即可看到。 */
+async function runDiscover(scopeKey) {
+  const scope = readScope(scopeKey);
+  if (!scope) return;
+  const p = scopeKey === CUSTOM_SCOPE ? null : modelPanel.providers.find((x) => x.provider === scopeKey) || null;
+  // ⚠ 地址框**空着是常态**（默认地址只写在 placeholder 里）。这时必须回落到该提供方
+  //   当前的地址，否则用户点一下就被「先填 API 地址」挡住 —— 而 UI 上明明显示着地址。
+  const baseUrl = scope.baseUrl || (p && typeof p.baseUrl === 'string' ? p.baseUrl : '');
+  const api = scope.api || (p && p.api) || PROVIDER_API_IDS[0];
+  if (!baseUrl) {
+    toast('先填 API 地址才能获取模型', 'warn');
+    return;
+  }
+  captureEdits();
+  modelPanel.discover = { scopeKey, loading: true, error: null, models: [], picked: new Set() };
+  renderProviderList();
+  try {
+    const res = await host.discoverModels({
+      provider: scopeKey === CUSTOM_SCOPE ? undefined : scopeKey,
+      baseUrl,
+      api,
+      apiKey: scope.apiKey || undefined,
+    });
+    const models = Array.isArray(res?.models) ? res.models : [];
+    modelPanel.discover = {
+      scopeKey,
+      loading: false,
+      error: null,
+      models,
+      // 默认全勾上：多数情况用户就是"把列出来的都加上"
+      picked: new Set(models.map((m) => m.modelId)),
+    };
+    toast(`拉到 ${models.length} 个模型`);
+  } catch (err) {
+    const detail = parseErrorMessage(err).detail;
+    modelPanel.discover = { scopeKey, loading: false, error: detail, models: [], picked: new Set() };
+    toast(`获取模型失败：${detail}`, 'err');
+  }
+  renderProviderList();
+}
+
+/** 把发现结果里勾中的模型并进模型目录（重名按 id 去重）。 */
+function adoptDiscovered(scopeKey) {
+  const d = modelPanel.discover;
+  const scope = scopeEl(scopeKey);
+  if (!d || d.scopeKey !== scopeKey || !scope) return;
+  const list = scope.querySelector('.modelRows__list');
+  if (!list) return;
+  const existing = new Set(readModelRows(scope).map((m) => m.id));
+  const empty = list.querySelector('.modelRows__empty');
+  if (empty) empty.remove();
+  let added = 0;
+  for (const m of d.models) {
+    if (!d.picked.has(m.modelId) || existing.has(m.modelId)) continue;
+    list.appendChild(buildModelRow({ id: m.modelId, name: m.name }));
+    existing.add(m.modelId);
+    added += 1;
+  }
+  modelPanel.discover = null;
+  captureEdits();
+  renderProviderList();
+  toast(added > 0 ? `已添加 ${added} 个模型（记得点保存）` : '没有可添加的模型（都已在目录里）', added > 0 ? undefined : 'warn');
+}
+
+/** 「创建提供方」：把自定义表单落成一条定义（密钥单独走 setApiKey）。 */
+async function createCustomProvider() {
+  const scope = readScope(CUSTOM_SCOPE);
+  if (!scope) return;
+  const id = scope.customId;
+  if (!PROVIDER_ID_RE.test(id)) {
+    toast('Provider ID 需小写字母开头，只含 a-z 0-9 和短横线', 'warn');
+    return;
+  }
+  if (modelPanel.providers.some((p) => p.provider === id)) {
+    toast(`Provider ID「${id}」已被占用`, 'warn');
+    return;
+  }
+  if (!scope.baseUrl) {
+    toast('API 地址必填', 'warn');
+    return;
+  }
+  const def = { api: scope.api || PROVIDER_API_IDS[0] };
+  if (scope.customName) def.displayName = scope.customName;
+  def.baseUrl = scope.baseUrl;
+  if (scope.models.length > 0) def.models = scope.models;
+
+  try {
+    await host.setProvider({ provider: id, definition: def });
+  } catch (err) {
+    toast(`创建失败：${parseErrorMessage(err).detail}`, 'err');
+    return;
+  }
+  if (scope.apiKey) {
+    try {
+      await host.setApiKey({ providerId: id, apiKey: scope.apiKey });
+    } catch (err) {
+      toast(`提供方已建，但密钥保存失败：${parseErrorMessage(err).detail}`, 'err');
+      modelPanel.drafts.delete(CUSTOM_SCOPE);
+      await refreshModelPanel();
+      return;
+    }
+  }
+  toast(`已创建提供方 ${id}`);
+  modelPanel.customOpen = false;
+  modelPanel.drafts.delete(CUSTOM_SCOPE);
+  modelPanel.discover = null;
+  await refreshModelPanel();
+}
+
+/** 重新拉一次目录并重绘（会清掉草稿 —— 数据已刷新，草稿不该再压着）。 */
+async function refreshModelPanel() {
+  modelPanel.drafts.clear();
   try {
     await loadModelPanel();
   } catch (err) {
     const status = $('#settingsStatus');
     if (status) status.textContent = `刷新提供方失败：${parseErrorMessage(err).detail}`;
+    return;
   }
+  renderProviderList();
 }
 
 function openMenu() {
@@ -3397,22 +3993,151 @@ function bindStatic() {
   $('#btnOutcomeGenerate').addEventListener('click', () => { void generateOutcomeFromComposer(); });
   $('#btnSettings').addEventListener('click', () => { void openSettingsPanel(); });
   $('#btnSettingsClose').addEventListener('click', () => { $('#settingsPanel').hidden = true; });
-  $('#btnProvAdd').addEventListener('click', () => { modelPanel.showMore = !modelPanel.showMore; renderProviderList(); });
-  // 提供方卡片内部是动态重建的，所以用**事件委托**挂在面板上（只绑一次）。
+  $('#btnProvAdd').addEventListener('click', () => { captureEdits(); modelPanel.showMore = !modelPanel.showMore; renderProviderList(); });
+  $('#btnProvCustom').addEventListener('click', () => {
+    captureEdits();
+    modelPanel.customOpen = !modelPanel.customOpen;
+    if (!modelPanel.customOpen) modelPanel.drafts.delete(CUSTOM_SCOPE);
+    renderProviderList();
+  });
+  // 卡片内部（含自定义表单）是动态重建的，所以用**事件委托**挂在面板上（只绑一次）。
   $('#settingsPanel').addEventListener('click', (ev) => {
-    const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-prov-edit],button[data-prov-cancel],button[data-prov-save]') : null;
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const btn = t.closest(
+      'button[data-prov-edit],button[data-prov-cancel],button[data-prov-save],' +
+        'button[data-prov-remove],button[data-prov-remove-confirm],button[data-prov-remove-cancel],' +
+        'button[data-model-add],button[data-model-del],button[data-models-reset],' +
+        'button[data-discover],button[data-discover-all],button[data-discover-adopt],button[data-discover-close],' +
+        'button[data-cp-create],button[data-cp-cancel]',
+    );
     if (!btn) return;
+
+    /** 按钮所在的最小 scope（卡片 or 自定义表单）。 */
+    const ownerScope = () => {
+      const holder = btn.closest('[data-model-host]') || btn.closest('.provCard') || btn.closest('.provCustom__card');
+      if (!holder) return null;
+      if (btn.closest('.provCustom__card')) return CUSTOM_SCOPE;
+      const host = btn.closest('[data-model-host]');
+      return host ? host.getAttribute('data-model-host') : null;
+    };
+    /** 按钮所在卡片的 provider id（自定义表单返回 CUSTOM_SCOPE）。 */
+    const ownerKey = () => {
+      if (btn.closest('.provCustom__card')) return CUSTOM_SCOPE;
+      const card = btn.closest('.provCard');
+      return card ? card.getAttribute('data-provider') : null;
+    };
+
     const editId = btn.getAttribute('data-prov-edit');
     const cancelId = btn.getAttribute('data-prov-cancel');
     const saveId = btn.getAttribute('data-prov-save');
+    const removeId = btn.getAttribute('data-prov-remove');
+    const removeConfirmId = btn.getAttribute('data-prov-remove-confirm');
+    const removeCancelId = btn.getAttribute('data-prov-remove-cancel');
+
     if (editId) {
-      if (modelPanel.openEditors.has(editId)) modelPanel.openEditors.delete(editId);
-      else modelPanel.openEditors.add(editId);
+      captureEdits();
+      if (modelPanel.openEditors.has(editId)) {
+        modelPanel.openEditors.delete(editId);
+        modelPanel.drafts.delete(editId);
+      } else {
+        modelPanel.openEditors.add(editId);
+      }
       renderProviderList();
       return;
     }
-    if (cancelId) { modelPanel.openEditors.delete(cancelId); renderProviderList(); return; }
-    if (saveId) { void saveProviderCard(saveId); }
+    if (cancelId) {
+      modelPanel.openEditors.delete(cancelId);
+      modelPanel.drafts.delete(cancelId);
+      modelPanel.pendingRemove = null;
+      renderProviderList();
+      return;
+    }
+    if (saveId) { void saveProviderCard(saveId); return; }
+    if (removeId) {
+      captureEdits();
+      modelPanel.pendingRemove = removeId;
+      renderProviderList();
+      return;
+    }
+    if (removeCancelId) { modelPanel.pendingRemove = null; renderProviderList(); return; }
+    if (removeConfirmId) { void removeProviderDefinition(removeConfirmId); return; }
+
+    if (btn.hasAttribute('data-model-add')) {
+      const scope = btn.closest('[data-model-host]');
+      const list = scope ? scope.querySelector('.modelRows__list') : null;
+      if (list) {
+        const empty = list.querySelector('.modelRows__empty');
+        if (empty) empty.remove();
+        const row = buildModelRow({ id: '', name: '' });
+        list.appendChild(row);
+        const first = row.querySelector('[data-model-id]');
+        if (first) first.focus();
+      }
+      return;
+    }
+    if (btn.hasAttribute('data-model-del')) {
+      const row = btn.closest('.modelRow');
+      if (!row) return;
+      const scope = btn.closest('[data-model-host]');
+      row.remove();
+      captureEdits();
+      if (scope && scope.querySelectorAll('.modelRow').length === 0) renderProviderList();
+      return;
+    }
+    if (btn.hasAttribute('data-models-reset')) {
+      const key = ownerKey();
+      if (key && key !== CUSTOM_SCOPE) void resetProviderModels(key);
+      return;
+    }
+    if (btn.hasAttribute('data-discover')) {
+      const key = ownerScope();
+      if (key) void runDiscover(key);
+      return;
+    }
+    if (btn.hasAttribute('data-discover-all')) {
+      const scope = btn.closest('.discover');
+      if (!scope || !modelPanel.discover) return;
+      const boxes = [...scope.querySelectorAll('[data-discover-pick]')];
+      const wantAll = boxes.some((cb) => !cb.checked);
+      for (const cb of boxes) cb.checked = wantAll;
+      modelPanel.discover.picked = new Set(wantAll ? modelPanel.discover.models.map((m) => m.modelId) : []);
+      btn.textContent = wantAll ? '取消全选' : '全选';
+      return;
+    }
+    if (btn.hasAttribute('data-discover-adopt')) {
+      const key = ownerScope();
+      if (key) adoptDiscovered(key);
+      return;
+    }
+    if (btn.hasAttribute('data-discover-close')) {
+      modelPanel.discover = null;
+      renderProviderList();
+      return;
+    }
+    if (btn.hasAttribute('data-cp-create')) { void createCustomProvider(); return; }
+    if (btn.hasAttribute('data-cp-cancel')) {
+      modelPanel.customOpen = false;
+      modelPanel.drafts.delete(CUSTOM_SCOPE);
+      modelPanel.discover = null;
+      renderProviderList();
+    }
+  });
+  // 勾选框变化要写回 picked（不然重绘后勾选状态会丢）
+  $('#settingsPanel').addEventListener('change', (ev) => {
+    const cb = ev.target;
+    if (!cb || !cb.hasAttribute || !cb.hasAttribute('data-discover-pick')) return;
+    if (!modelPanel.discover) return;
+    const id = String(cb.value || '');
+    if (cb.checked) modelPanel.discover.picked.add(id);
+    else modelPanel.discover.picked.delete(id);
+  });
+  // 在折叠区里打字也顺手存草稿，避免任何重绘把字吃掉
+  $('#settingsPanel').addEventListener('input', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    if (!t.closest('[data-model-host]') && !t.closest('.provCustom__card')) return;
+    captureEdits();
   });
   document.querySelectorAll('[data-outcome-format]').forEach((b) => b.addEventListener('click', () => {
     document.querySelectorAll('[data-outcome-format]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
@@ -4153,7 +4878,7 @@ function createMockHost() {
     /** 最近一张未决审批的 id（供「就地更新一张」按钮定位） */
     __lastApprovalId() { return approvalStore.size ? [...approvalStore.keys()][approvalStore.size - 1] : null; },
     listModels() { return Promise.resolve({ current: null, defaultModel: { provider: 'mock', modelId: 'deepseek-flash' }, models: [{ provider: 'mock', modelId: 'deepseek-mock-1', name: 'Mock 模型', available: true, needsAuth: false }] }); },
-    /** 模型设置面板在 mock 模式下的假数据：两个「国内厂商」+ 一个未配置的，用来验卡片态。 */
+    /** 模型设置面板在 mock 模式下的假数据：两个「国内厂商」+ 一个自定义 + 一个未配置的。 */
     listProviders() {
       return Promise.resolve({
         current: null,
@@ -4162,27 +4887,70 @@ function createMockHost() {
         providers: [
           {
             provider: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com',
+            api: 'openai-completions',
             configured: true, authSource: 'stored',
+            custom: false, edited: false, modelsEdited: false, hasBaseUrlOverride: false,
             models: [
-              { modelId: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1000000, maxTokens: 384000, available: true },
-              { modelId: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1000000, maxTokens: 384000, available: true },
+              { modelId: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', api: 'openai-completions', contextWindow: 1000000, maxTokens: 384000, available: true },
+              { modelId: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', api: 'openai-completions', contextWindow: 1000000, maxTokens: 384000, available: true },
             ],
           },
           {
             provider: 'zai', name: 'Z.AI', baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+            api: 'openai-completions',
             configured: false, authSource: null,
-            models: [{ modelId: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1000000, maxTokens: 131072, available: false }],
+            custom: false, edited: false, modelsEdited: false, hasBaseUrlOverride: false,
+            models: [{ modelId: 'glm-5.3', name: 'GLM-5.3', api: 'openai-completions', contextWindow: 1000000, maxTokens: 131072, available: false }],
+          },
+          {
+            provider: 'qa-gateway', name: 'QA Gateway', baseUrl: 'https://gateway.example/v1',
+            api: 'openai-completions',
+            configured: true, authSource: 'stored',
+            custom: true, edited: true, modelsEdited: true, hasBaseUrlOverride: true,
+            models: [{ modelId: 'qa-model-1', name: 'QA Model 1', api: 'openai-completions', contextWindow: 128000, maxTokens: 16384, available: true }],
           },
           {
             provider: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1',
+            api: 'openai-responses',
             configured: false, authSource: null,
-            models: [{ modelId: 'gpt-5', name: 'GPT-5', contextWindow: 400000, maxTokens: 128000, available: false }],
+            custom: false, edited: false, modelsEdited: false, hasBaseUrlOverride: false,
+            models: [{ modelId: 'gpt-5', name: 'GPT-5', api: 'openai-responses', contextWindow: 400000, maxTokens: 128000, available: false }],
           },
         ],
       });
     },
     setModel() { return Promise.resolve({ ok: true, note: '新会话生效' }); },
-    setApiKey() { return Promise.resolve({ ok: true, persisted: true }); },
+    setApiKey(arg) { mockProviderWrites.push({ kind: 'setApiKey', arg }); return Promise.resolve({ ok: true, persisted: true }); },
+    /** 写提供方定义（mock：只回报成功，不真落盘） */
+    setProvider(arg) {
+      mockProviderWrites.push({ kind: 'setProvider', arg });
+      return Promise.resolve({ ok: true, provider: { provider: arg?.provider }, applied: [arg?.provider], removed: [], failed: [], note: '新会话生效' });
+    },
+    removeProvider(arg) {
+      mockProviderWrites.push({ kind: 'removeProvider', arg });
+      return Promise.resolve({ ok: true, provider: arg?.provider, applied: [], removed: [arg?.provider], failed: [] });
+    },
+    /** 获取可用模型（mock：固定回三条，便于断言"添加所选"的合并行为） */
+    discoverModels(arg) {
+      mockProviderWrites.push({ kind: 'discoverModels', arg });
+      if (arg && arg.baseUrl && /fail/i.test(arg.baseUrl)) {
+        return Promise.reject(new Error('DISCOVER_FAILED: 提供方返回 HTTP 404'));
+      }
+      return Promise.resolve({
+        url: `${arg?.baseUrl || ''}/models`,
+        protocol: arg?.api || 'openai-completions',
+        models: [
+          { modelId: 'discovered-a', name: 'Discovered A' },
+          { modelId: 'discovered-b', name: 'discovered-b' },
+          { modelId: 'deepseek-flash', name: 'Duplicate' },
+        ],
+      });
+    },
+    /**
+     * ⚠ mock 收到的写操作记在**模块作用域的 mockProviderWrites** 里，
+     * 由 `window.__minipi.__providerWrites()` 读 —— 不要在这里再挂一份：
+     * 测试拿到的是 `window.__minipi`，挂在 mock host 上的探针是读不到的。
+     */
   };
 }
 
@@ -4419,9 +5187,19 @@ async function boot() {
 }
 
 /* ---- 给自动化测试（headless Chrome + CDP）用的只读探针；不暴露任何敏感信息 ---- */
+/**
+ * mock 模式下收到的「提供方写操作」记录（setProvider / removeProvider / discoverModels）。
+ * 挂在**模块作用域**而不是 mock host 内部：`window.__minipi` 探针对象与 mock host
+ * 是两个不同的对象，测试只能从探针读 —— 放里面就读不到（这是踩过一次的坑）。
+ */
+const mockProviderWrites = [];
+
 window.__minipi = {
   protocolVersion: PROTOCOL_VERSION,
   mock: () => store.mock,
+  /** 测试探针：mock 收到的提供方写操作（断言「点了什么发什么」） */
+  __providerWrites: () => mockProviderWrites.slice(),
+  __providerWritesReset: () => { mockProviderWrites.length = 0; return true; },
   mode: () => store.mode,
   ball: () => store.ball,
   conn: () => store.conn,

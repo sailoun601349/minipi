@@ -62,6 +62,10 @@ export const INVOKE = Object.freeze({
   LIST_PROVIDERS: "minipi:listProviders",
   SET_MODEL: "minipi:setModel",
   SET_API_KEY: "minipi:setApiKey",
+  // 模型配置第二批：提供方定义（自定义提供方 / API 地址与模型目录覆盖 / 拉取模型清单）
+  SET_PROVIDER: "minipi:setProvider",
+  REMOVE_PROVIDER: "minipi:removeProvider",
+  DISCOVER_MODELS: "minipi:discoverModels",
   // M4 审批闸门（审批设计 §9.1）——渲染 → 主：用户点了「允许一次 / 拒绝 / 中断整轮」
   APPROVAL_DECIDE: "minipi:approvalDecide",
 });
@@ -104,6 +108,12 @@ export const ERROR_CODES = Object.freeze({
   OUTCOME_NOT_FOUND: "OUTCOME_NOT_FOUND",
   SANDBOX_DENIED: "SANDBOX_DENIED",
   MODEL_NOT_FOUND: "MODEL_NOT_FOUND",
+  // PROVIDER_NOT_FOUND：removeProvider 的 provider 既不在 minipi 的提供方定义里
+  PROVIDER_NOT_FOUND: "PROVIDER_NOT_FOUND",
+  // PROVIDER_INVALID：提供方定义不合法（id 形态 / baseUrl 非 http(s) / 协议不在枚举内 / 模型条目非法）
+  PROVIDER_INVALID: "PROVIDER_INVALID",
+  // DISCOVER_FAILED：拉取模型清单失败（网络 / 非 2xx / 响应不是 list / 协议不支持）
+  DISCOVER_FAILED: "DISCOVER_FAILED",
   // M4 审批闸门（审批设计 §9.1 / §5）
   // APPROVAL_TIMEOUT：5 分钟未响应 ⇒ 默认拒绝（fail-closed，绝不放行）
   APPROVAL_TIMEOUT: "APPROVAL_TIMEOUT",
@@ -491,6 +501,27 @@ export const FEATURED_PROVIDER_IDS = Object.freeze([
   "ant-ling",
 ]);
 
+/**
+ * 自定义提供方支持的 **API 协议**（逐字取自 Pi 的 `docs/models.md`「Supported APIs」表）。
+ *
+ * ⚠ 这份是**枚举白名单**，不是建议列表：写进 `registerProvider()` 的 `api` 必须是这四个之一，
+ *    否则 Pi 侧组不出 provider。渲染层的下拉框也吃这一份（不许自己再列一遍）。
+ */
+export const PROVIDER_API_IDS = Object.freeze([
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+]);
+
+/**
+ * 自定义提供方的 **Provider ID 形态**：小写字母开头，只含 `[a-z0-9-]`。
+ *
+ * 为什么这么严：这个 id 会进 `registerProvider()`、会派生凭据名、还会出现在模型标识
+ * （`provider/modelId`）里；放开大写/下划线/空格只会让后面每一层都要额外转义。
+ */
+export const PROVIDER_ID_PATTERN_SOURCE = "^[a-z][a-z0-9-]*$";
+
 /* ========================================================================== *
  * 7. 入参上下界（宿主层强制，渲染层可提前用同一份常量做前端校验）
  * ========================================================================== */
@@ -538,6 +569,22 @@ export const LIMITS = Object.freeze({
   PROVIDER_MODELS_MAX: 80,
   /** 模型设置页最多回传的提供方条数 */
   PROVIDER_LIST_MAX: 80,
+  /** 自定义提供方 id 长度上限（字符） */
+  PROVIDER_ID_MAX_CHARS: 64,
+  /** 提供方显示名长度上限（字符） */
+  PROVIDER_DISPLAY_NAME_MAX_CHARS: 64,
+  /** 提供方 API 地址长度上限（字符） */
+  PROVIDER_BASE_URL_MAX_CHARS: 512,
+  /** 单个模型 id 长度上限（字符） */
+  PROVIDER_MODEL_ID_MAX_CHARS: 200,
+  /** 单个模型显示名长度上限（字符） */
+  PROVIDER_MODEL_NAME_MAX_CHARS: 200,
+  /** 拉取可用模型的超时（毫秒）——网络调用必须有硬上限 */
+  DISCOVER_MODELS_TIMEOUT_MS: 15000,
+  /** 拉取可用模型时最多接收的条数（防一个畸形响应把界面撑爆） */
+  DISCOVER_MODELS_MAX: 500,
+  /** 拉取可用模型的响应体字节上限（防超大响应把内存吃满） */
+  DISCOVER_MODELS_MAX_BYTES: 2 * 1024 * 1024,
   // ---- 思考段 / 正文里的「模型吐出工具调用标记」识别（显示层）----
   /** 单段文本里最多识别几个 `<invoke>` 块；超出的原样当正文显示 */
   TOOL_INVOKE_MAX_BLOCKS: 20,
