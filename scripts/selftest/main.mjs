@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { BrowserWindow, app, screen } from "electron";
 
 import { EVENTS, INVOKE } from "../../src/shared/protocol.js";
-import { SettingsStore } from "../../src/main/settings.js";
+import { ALLOWED_TOP_KEYS, SettingsStore } from "../../src/main/settings.js";
 import { FALLBACK_ENTRY, PRELOAD_PATH, WindowManager } from "../../src/main/window.js";
 import { PiSessionHost } from "../../src/main/pi/session.js";
 // 走**真实的** IPC 路由实现（不是测试里另写一套）
@@ -61,6 +61,28 @@ const extraWindows = [];
 function track(win) {
   extraWindows.push(win);
   return win;
+}
+
+/**
+ * 逐个跑测试并**隔离故障**。
+ *
+ * 为什么必须隔离（2026-10-16 实测事故）：T2 抛错时，外层那个大 catch 会把整个 main
+ * 流程掐断 —— **T3/T4 一次都没执行**，而报告里它们显示成 `n/a`，看着像"跳过"、
+ * 实际是"没跑到"。一个测试的失败绝不该让后面的测试变成幽灵：**没测到 ≠ 不用测**。
+ *
+ * @param {string} id 报告里的编号（T0…T4）
+ * @param {string} label 中文名
+ * @param {() => Promise<object>} fn
+ * @returns {Promise<object>} 失败时返回一个带 `failed: true` 的占位对象
+ */
+async function runTest(id, label, fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    err(`${id}.exception`, e);
+    say(` ${id} ${label} : 抛错（已隔离，后续测试继续）— ${e?.message ?? e}`);
+    return { name: label, failed: true, error: String(e?.message ?? e) };
+  }
 }
 function err(at, e) {
   report.errors.push({ at, message: String(e?.message ?? e) });
@@ -258,13 +280,72 @@ async function testThrottle() {
   }
   t.throttlingGetter = t.constructorOption.getBackgroundThrottling;
 
-  await wm.setState("mini");
-  const b = wm.window.getBounds();
-  const probeRect = { x: b.x, y: b.y, width: b.width, height: b.height };
+  /* --- 测量对象：**独立探针窗口**，不是主窗口 ---
+     ⚠ 2026-10-16 修的坑：`window.__probeReset` / `window.__probeRead` 只定义在探针页
+       `scripts/probe/stub.html` 里；主窗口加载的是真实渲染层
+       `src/renderer/index.html`（grep 实测 0 处）。原来那两行
+       `wm.webContents.executeJavaScript(...)` 因此直接 reject ⇒ `measure()` 抛 ⇒
+       `t.occluded` 留成 undefined ⇒ 紧接着读 `.rafPerSec` 再抛一次 ⇒
+       **整个自测中断，T3/T4 从未执行**（报告里显示成 n/a，看着像"跳过"，实际是"没跑到"）。
+       静默的整段跳过比一个明确的失败更危险 —— 所以现在既换测量对象、也加隔离。
+
+     为什么量探针窗依然有效：M0 硬指标的本质是「webPreferences 的
+       backgroundThrottling:false 让 rAF 在失焦/遮挡时照跑」，这是**窗口属性**；
+       只要探针窗该属性与主窗口一致（下面 samePrefsAsRealWindow 会实测比对），结论可迁移。
+
+     为什么探针窗刻意**非透明**：注释里早就记过 —— Chromium 不对透明窗做遮挡判定，
+       主窗口是 transparent ⇒ visibilityState 恒为 visible ⇒「被遮挡」那一档根本测不出东西。
+
+     位置刻意避开主窗口与后面控制组的两个窗（它们占 x=+16 / +340），免得互相遮挡。 */
+  const waT2 = screen.getPrimaryDisplay().workArea;
+  const PROBE_W = 320;
+  const PROBE_H = 200;
+  const probeRect = {
+    x: Math.min(waT2.x + 700, waT2.x + waT2.width - PROBE_W - 8),
+    y: Math.min(waT2.y + 620, waT2.y + waT2.height - PROBE_H - 24),
+    width: PROBE_W,
+    height: PROBE_H,
+  };
+  const probeWin = track(
+    new BrowserWindow({
+      ...probeRect,
+      frame: true,
+      transparent: false,
+      resizable: false,
+      hasShadow: false,
+      skipTaskbar: true,
+      show: false,
+      backgroundColor: "#101820",
+      /* ⚠ `sandbox: false` + `preload` 不是装饰，是**必须与主窗口逐项一致**：
+         本机实测（2026-10-16）—— 不带 `sandbox: false` 的窗口在这里根本起不来，
+         `loadFile` 直接 `ERR_FAILED (-2)`，而且**不触发 did-fail-load**，
+         报错形态和「路径写错 / 文件不存在」一模一样，极难定位。
+         当时唯一的差分线索是：同一个进程里 T3 的 alien 窗口（带 sandbox:false）加载
+         同一个 stub.html 是**成功**的。
+         本 App 的主窗口本来就设了 `sandbox: false`（ESM preload 需要），
+         所以自测里每一个自建窗口都必须跟上，否则一建就瞎。 */
+      webPreferences: {
+        preload: PRELOAD_PATH,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+        backgroundThrottling: false,
+      },
+    }),
+  );
+  await probeWin.loadFile(FALLBACK_ENTRY);
+  probeWin.show();
+  t.probePrefs = { backgroundThrottling: probeWin.webContents.getBackgroundThrottling() };
+  t.realWindowPrefs = { backgroundThrottling: t.throttlingGetter };
+  t.samePrefsAsRealWindow = t.probePrefs.backgroundThrottling === t.realWindowPrefs.backgroundThrottling;
+  say(
+    ` T2 探针窗 backgroundThrottling=${t.probePrefs.backgroundThrottling} · 主窗口=${t.realWindowPrefs.backgroundThrottling}` +
+      ` · 一致=${t.samePrefsAsRealWindow}`,
+  );
 
   async function measure(label, { occlude, stealFocus }) {
     // 先归零计数
-    await wm.webContents.executeJavaScript("window.__probeReset()");
+    await probeWin.webContents.executeJavaScript("window.__probeReset()");
     let occluder = null;
     let stealer = null;
     try {
@@ -279,7 +360,7 @@ async function testThrottle() {
             skipTaskbar: true,
             show: false,
             backgroundColor: "#3A2C05",
-            webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: true },
+            webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: true },
           }),
         );
         await occluder.loadURL(
@@ -300,7 +381,7 @@ async function testThrottle() {
             alwaysOnTop: false,
             show: false,
             backgroundColor: "#202A36",
-            webPreferences: { contextIsolation: true, nodeIntegration: false },
+            webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false },
           }),
         );
         await stealer.loadURL(
@@ -313,9 +394,16 @@ async function testThrottle() {
 
       await delay(700);
       // 归零要在遮挡/失焦稳定之后
-      await wm.webContents.executeJavaScript("window.__probeReset()");
+      await probeWin.webContents.executeJavaScript("window.__probeReset()");
       await delay(THROTTLE_SEC * 1000);
-      const read = await wm.webContents.executeJavaScript("window.__probeRead()");
+      const read = await probeWin.webContents.executeJavaScript("window.__probeRead()");
+      // 探针没回对象就**当场抛可读错误**，绝不把 undefined 往下传 ——
+      // 那正是这次事故的形态：undefined 一路走到 `.rafPerSec` 才炸，报错信息完全指不到根因。
+      if (!read || typeof read !== "object") {
+        throw new Error(
+          `探针页未返回计数对象（拿到 ${JSON.stringify(read)}）；请确认 ${FALLBACK_ENTRY} 能加载且含 __probeReset/__probeRead`,
+        );
+      }
       const perSec = read.elapsedMs > 0 ? Number(((read.raf / read.elapsedMs) * 1000).toFixed(1)) : null;
       return { label, ...read, rafPerSec: perSec, intervalPerSec: Number(((read.interval / read.elapsedMs) * 1000).toFixed(1)) };
     } finally {
@@ -335,15 +423,41 @@ async function testThrottle() {
     t.occluded = await measure("被遮挡 + 未聚焦", { occlude: true, stealFocus: true });
   } catch (e) {
     err("T2.measure", e);
+    t.measureFailed = String(e?.message ?? e);
+  } finally {
+    // 三档测完就撤掉探针窗：免得和控制组抢位置、抢焦点
+    try {
+      if (!probeWin.isDestroyed()) probeWin.destroy();
+    } catch {
+      /* ignore */
+    }
   }
 
-  t.occluded.paintsWhenHidden = t.occluded.rafPerSec !== null && t.occluded.rafPerSec > 5;
+  /* ⚠ 取值一律走这个安全读法。`t.occluded` 可能是 undefined（measure 抛过、被上面 catch 兜住），
+     **绝对不要再写裸的 `t.occluded.rafPerSec`** —— 那正是 2026-10-16「整个自测中断」的直接原因。
+     测不到时 `paintsWhenHidden` 记 **null**（报告里显示 n/a），不要记 false：
+     「没测到」和「测到了但失败」是两件事，混在一起会误导后来人。 */
+  const rafOf = (r) => (r && typeof r.rafPerSec === "number" ? r.rafPerSec : null);
+  if (!t.occluded || typeof t.occluded !== "object") {
+    t.occluded = {
+      label: "被遮挡 + 未聚焦",
+      raf: null,
+      rafPerSec: null,
+      interval: null,
+      intervalPerSec: null,
+      visibilityState: null,
+      hasFocus: null,
+      probeUnavailable: true,
+    };
+  }
+  t.occludedRate = rafOf(t.occluded);
+  t.occluded.paintsWhenHidden = t.occludedRate === null ? null : t.occludedRate > 5;
   t.verdict =
-    t.occluded.paintsWhenHidden === true
-      ? "PASS：被遮挡 + 未聚焦时 rAF 仍在全速跑（backgroundThrottling:false 生效）"
-      : t.occluded.paintsWhenHidden === false
-        ? "FAIL：被遮挡时 rAF 掉到 ~0 ⇒ M0 硬指标不成立"
-        : "无法判定";
+    t.occludedRate === null
+      ? "无法判定（被遮挡那一档没测到 —— 往上翻 T2.measure 的错误）"
+      : t.occluded.paintsWhenHidden === true
+        ? "PASS：被遮挡 + 未聚焦时 rAF 仍在全速跑（backgroundThrottling:false 生效）"
+        : "FAIL：被遮挡时 rAF 掉到 ~0 ⇒ M0 硬指标不成立";
 
   const f = (r) => (r ? `raf=${r.raf} (${r.rafPerSec}/s) interval=${r.interval} (${r.intervalPerSec}/s) visibility=${r.visibilityState} focus=${r.hasFocus}` : "n/a");
   say(` T2 可见+聚焦        ${f(t.visibleFocused)}`);
@@ -398,7 +512,7 @@ async function measureControlPair() {
         skipTaskbar: true,
         show: false,
         backgroundColor: "#101820",
-        webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: bt },
+        webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: bt },
       }),
     );
   const a = mk(16, false);
@@ -421,7 +535,7 @@ async function measureControlPair() {
       skipTaskbar: true,
       show: false,
       backgroundColor: "#3A2C05",
-      webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: true },
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: true },
     }),
   );
   await occluder.loadURL(
@@ -529,14 +643,21 @@ async function testValidation() {
   // 未知键被白名单丢掉（不是报错，但不能污染设置）
   await expectOk("setSettings 未知键被丢弃", `window.minipi.setSettings({ totallyUnknownKey: 1 })`);
 
-  /* --- 白名单校验：settings 里不应出现未知键 --- */
+  /* --- 白名单校验：settings 里不应出现未知键 ---
+     ⚠ 允许键**从 settings.js 导入**，不要在这里抄一份数组：
+     2026-10-16 就是因为这里硬编码了 ["version","sceneId","noFocusSteal","window"]，
+     而实现早已多了合法的 `model`，于是把合法键误报成「泄漏」⇒ T3 假失败。 */
   const after = await call(`window.minipi.getSettings()`);
   const topKeys = after?.value ? Object.keys(after.value) : [];
   t.settingsTopKeys = topKeys;
-  const allowed = ["version", "sceneId", "noFocusSteal", "window"];
+  const allowed = [...ALLOWED_TOP_KEYS];
   const leaked = topKeys.filter((k) => !allowed.includes(k));
-  if (leaked.length > 0) t.allRejected = false;
-  say(` T3 设置顶层键白名单               ${leaked.length === 0 ? "OK  " : "!!  "} ${JSON.stringify(topKeys)}`);
+  const missing = allowed.filter((k) => !topKeys.includes(k));
+  if (leaked.length > 0 || missing.length > 0) t.allRejected = false;
+  say(
+    ` T3 设置顶层键白名单               ${leaked.length === 0 && missing.length === 0 ? "OK  " : "!!  "} ${JSON.stringify(topKeys)}` +
+      `（多出 ${JSON.stringify(leaked)} / 缺失 ${JSON.stringify(missing)}）`,
+  );
 
   /* --- 越权：非主窗口的 webContents 调管理接口必须被拒 ---
      本 App 无登录态，「越权」的等价物是「不是主窗口发来的调用」。
@@ -707,11 +828,11 @@ app.whenReady().then(async () => {
     await wm.create();
     say(` 窗口已建 · 渲染层=${wm.usingFallbackRenderer ? "兜底探针页" : "src/renderer/index.html"}`);
 
-    report.tests.T0 = await testPreload();
-    report.tests.T1 = await testMorph();
-    report.tests.T2 = await testThrottle();
-    report.tests.T3 = await testValidation();
-    report.tests.T4 = await testSettingsStore();
+    report.tests.T0 = await runTest("T0", "preload 暴露与 invoke 往返", testPreload);
+    report.tests.T1 = await runTest("T1", "单窗口三态变形", testMorph);
+    report.tests.T2 = await runTest("T2", "未聚焦 / 被遮挡仍在画", testThrottle);
+    report.tests.T3 = await runTest("T3", "入参校验与越权拒绝", testValidation);
+    report.tests.T4 = await runTest("T4", "设置存储健壮性", testSettingsStore);
   } catch (e) {
     err("main", e);
     say(`!! 主流程异常：${e?.stack ?? e}`);

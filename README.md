@@ -65,13 +65,33 @@ npm run launch       # 只跑启动壳，不经过 .cmd
 ### 自测与实测
 
 ```bash
-npm run selftest        # 宿主层自测（T0–T4），需要可用的 GPU
+npm run verify:all      # ★ 串行回归全量（21 个脚本 / 1100+ 项断言），含真窗口自测
+npm run selftest        # 只跑宿主层自测（T0–T4），需要可用的 GPU
 npm run selftest:soft   # 同上，但带 --disable-gpu：给沙箱 / 无头 / CI 环境用
 npm run verify:stream   # 真实调用一次模型，验证逐字流式（会消耗模型额度）
 npm run verify:electron # 校验 electron 二进制是否真的下来了
 ```
 
 实测产物落在 `scripts/out/`：`selftest.json`（机器可读）、`selftest.txt`（人读）、`verify-stream.json`。
+
+> **宿主层自测（T0–T4）现在是回归门的一部分**（`verify:all` 里的 `selftest:host`）。
+> 它必须在 **Electron** 里跑 —— `verify-all` 用 `via: ["start.mjs", "--selftest"]` 换掉默认的
+> `node <file>` 启动方式，因为纯 Node 下拿不到 `BrowserWindow`。
+>
+> **2026-10-16 修的两个问题（都属"静默失效"类，值得记住）：**
+>
+> 1. **T2/T3/T4 从未执行。** T2 在主窗口上调 `window.__probeReset/__probeRead`，
+>    而这两个探针只定义在兜底探针页 `scripts/probe/stub.html` —— 主窗口加载的是真实渲染层
+>    `src/renderer/index.html`（grep 实测 0 处）。于是 `executeJavaScript` reject ⇒
+>    `measure()` 抛 ⇒ `t.occluded` 留成 undefined ⇒ 紧接着读 `.rafPerSec` 再抛一次 ⇒
+>    外层大 catch 掐断整个流程。报告里 T3/T4 显示 `n/a`，**看着像"跳过"，实际是"没跑到"**。
+>    修法：T2 改用**自建探针窗**（加载 stub.html）+ `runTest()` 逐测试隔离故障 + 取值走安全读法
+>    （测不到记 `null` = n/a，**不要记 false** ——「没测到」和「测到了但失败」是两件事）。
+> 2. **`sandbox: false` 不能省。** 不带它的自建窗口在本机根本起不来，`loadFile` 直接
+>    `ERR_FAILED (-2)`，而且**不触发 `did-fail-load`** —— 报错形态和「路径写错」一模一样。
+>    本 App 主窗口本来就设了 `sandbox: false`（ESM preload 需要），自测里每个自建窗口都要跟上。
+>    当时唯一的差分线索是：同进程内 T3 的 alien 窗口（带 `sandbox:false`）加载同一个
+>    `stub.html` 是成功的。
 
 ---
 

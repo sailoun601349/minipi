@@ -50,8 +50,14 @@ export const SCENE_CWD_DIRS = Object.freeze({
   repo: path.join(MINIPI_HOME, "repo"),
 });
 
-/** 允许写进 settings.json 的顶层键（其余丢弃）。 */
-const ALLOWED_TOP_KEYS = Object.freeze(["version", "sceneId", "noFocusSteal", "model", "window"]);
+/**
+ * 允许写进 settings.json 的顶层键（其余丢弃）。
+ *
+ * ⚠ **导出是刻意的**：自测（`scripts/selftest/main.mjs` 的 T3）要校验「白名单没漏」，
+ * 它必须吃这份**唯一真源**，不能自己抄一份键名数组 —— 抄的那份会在加键时静默过期，
+ * 然后把合法的新键误报成「泄漏」（2026-10-16 加 `model` 时就是这么翻的车）。
+ */
+export const ALLOWED_TOP_KEYS = Object.freeze(["version", "sceneId", "noFocusSteal", "model", "window"]);
 
 function sanitizeModelPreference(value) {
   if (!isPlainObject(value)) return null;

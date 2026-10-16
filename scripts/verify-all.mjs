@@ -24,7 +24,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * 回归门清单（顺序即执行顺序；headless Chrome 的放最后，避免拖慢早期快脚本的可读性）。
- * @type {Array<{name:string, file:string, note?:string}>}
+ *
+ * `via` 用于「不能直接用 node 跑」的脚本：不给就默认 `node <file>`；
+ * 给了就用这段参数替代（宿主层自测必须在 Electron 里跑，`node` 直接跑会拿不到 BrowserWindow）。
+ * @type {Array<{name:string, file:string, note?:string, via?:string[]}>}
  */
 const SUITE = [
   { name: "verify:approval",        file: "verify-approval.mjs",        note: "M4 审批（195 项）" },
@@ -33,6 +36,8 @@ const SUITE = [
   { name: "verify:outcome",         file: "verify-outcome.mjs",         note: "M5 产出（97 项）" },
   { name: "verify:launcher",        file: "verify-launcher.mjs",        note: "双击启动器（静态）" },
   { name: "verify:launch-live",     file: "verify-launch-live.mjs",     note: "双击启动器（真启动 + 存活）" },
+  // 宿主层自测：必须在 Electron 里跑（要用真的 BrowserWindow 量 rAF 节流），所以走 start.mjs
+  { name: "selftest:host",          file: "selftest/main.mjs",          note: "宿主层自测 T0–T4（真窗口）", via: ["start.mjs", "--selftest"] },
   { name: "qa:outcome-entry",       file: "qa-outcome-entry.mjs",       note: "真实产出入口" },
   { name: "verify:models",           file: "verify-models.mjs",           note: "模型配置与凭证存储" },
   { name: "verify:thought",         file: "verify-thought-markup.mjs",  note: "工具标记识别 + 镜像漂移" },
@@ -53,7 +58,7 @@ const SUITE = [
 const PENDING = [];
 
 console.log("=".repeat(72));
-console.log(`verify:all —— 串行回归 ${SUITE.length} 个脚本（纯 Node / headless Chrome，不含真 Pi 会话）`);
+console.log(`verify:all —— 串行回归 ${SUITE.length} 个脚本（纯 Node / headless Chrome / 真 Electron 窗口，不含真 Pi 会话）`);
 console.log("=".repeat(72));
 
 const failed = [];
@@ -61,8 +66,9 @@ const startedAt = Date.now();
 
 for (const [i, s] of SUITE.entries()) {
   const abs = path.join(__dirname, s.file);
+  const args = s.via ? s.via.map((a) => (a.endsWith(".mjs") ? path.join(__dirname, a) : a)) : [abs];
   console.log(`\n▶ [${String(i + 1).padStart(2)}/${SUITE.length}] ${s.name}  ${s.note ? `（${s.note}）` : ""}`);
-  const r = spawnSync(process.execPath, [abs], { stdio: "inherit", cwd: path.resolve(__dirname, "..") });
+  const r = spawnSync(process.execPath, args, { stdio: "inherit", cwd: path.resolve(__dirname, "..") });
   if (r.status === 0) {
     console.log(`  ✔ ${s.name} EXIT=0`);
   } else {
