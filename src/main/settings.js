@@ -18,6 +18,7 @@ import os from "node:os";
 import {
   DEFAULT_SETTINGS,
   LIMITS,
+  THEME_IDS,
   WINDOW_STATE_IDS,
   createDefaultSettings,
   isPlainObject,
@@ -42,12 +43,10 @@ export const LOG_DIR = path.join(MINIPI_HOME, "logs");
  */
 export const OUTBOX_DIR = path.join(MINIPI_HOME, "outbox");
 
-/** 需要预建的四场景 cwd（§3.2 场景表）。 */
+/** 需要预建的两档 cwd（D-10：chat / work 都落在 outbox）。 */
 export const SCENE_CWD_DIRS = Object.freeze({
-  quick: OUTBOX_DIR,
-  note: OUTBOX_DIR,
-  desk: OUTBOX_DIR,
-  repo: path.join(MINIPI_HOME, "repo"),
+  chat: OUTBOX_DIR,
+  work: OUTBOX_DIR,
 });
 
 /**
@@ -57,7 +56,7 @@ export const SCENE_CWD_DIRS = Object.freeze({
  * 它必须吃这份**唯一真源**，不能自己抄一份键名数组 —— 抄的那份会在加键时静默过期，
  * 然后把合法的新键误报成「泄漏」（2026-10-16 加 `model` 时就是这么翻的车）。
  */
-export const ALLOWED_TOP_KEYS = Object.freeze(["version", "sceneId", "noFocusSteal", "model", "window"]);
+export const ALLOWED_TOP_KEYS = Object.freeze(["version", "sceneId", "noFocusSteal", "model", "theme", "webEnabled", "alwaysOnTop", "window"]);
 
 function sanitizeModelPreference(value) {
   if (!isPlainObject(value)) return null;
@@ -68,24 +67,32 @@ function sanitizeModelPreference(value) {
 }
 
 /**
- * v0.4 场景改名映射（plan §3.2 / §10 D-23）。
+ * 场景改名映射（D-10 / D-15：四场景 → chat / work，repo 已砍）。
  *
- * 老用户的 `settings.json` 里可能还躺着 `speed` / `study` / `work`。
+ * 老用户的 `settings.json` 里可能还躺着 `speed` / `study` / `work` / `quick` / `note` / `desk` / `repo`。
  * 这里做**静默映射**而不是报错——理由是：
  *   · 场景名不是用户资产，只是「他上次在哪」的记忆；
- *   · 为一个改名让 App 报错或重置用户设置，代价远大于收益；
- *   · 映射是**无损**的（语义一一对应，见下）。
+ *   · 为一个改名让 App 报错或重置用户设置，代价远大于收益。
  *
- * 注意 `study` → `note` 而非 `desk`：`note` 的定位（读长文/写笔记）更接近老 `study`。
+ * ⚠ 语义变更（必须知道）：
+ *   · `quick` / `note` / `desk` **全部收敛到 `chat`** —— 它们都是「不碰用户文件」的形态，
+ *     原来的区分（是否落盘到 outbox）已由「导出」这一个动作覆盖；
+ *   · 老 `work`（**改代码**）与新 `work`（**改文档**）是同一个词、两套语义 ⇒ 一律映射到新 `work`，
+ *     因为它同样是「会碰本地文件、走审批」的那一档；
+ *   · `repo` 已砍掉（D-15），同样落到 `work`：落到 `chat` 会让用户以为文件没被碰过。
  */
 const LEGACY_SCENE_MAP = Object.freeze({
-  speed: "quick",
-  study: "note",
-  work: "repo",
+  speed: "chat",
+  quick: "chat",
+  study: "chat",
+  note: "chat",
+  desk: "chat",
+  work: "work",
+  repo: "work",
 });
 
 /**
- * 把历史场景名映射成 v0.4 的新名。**纯函数**。
+ * 把历史场景名映射成当前场景名（chat / work）。**纯函数**。
  * 非历史名原样返回（合法性由 `scenes.js` 判定）。
  * @param {string} sceneId
  * @returns {string}
@@ -121,6 +128,9 @@ export function normalizeSettings(input, fallback = DEFAULT_SETTINGS) {
   if (isSafeInt(base.version) && base.version > 0) out.version = base.version;
   if (typeof base.sceneId === "string") out.sceneId = migrateSceneId(base.sceneId);
   if (typeof base.noFocusSteal === "boolean") out.noFocusSteal = base.noFocusSteal;
+  if (typeof base.theme === "string" && THEME_IDS.includes(base.theme)) out.theme = base.theme;
+  if (typeof base.webEnabled === "boolean") out.webEnabled = base.webEnabled;
+  if (typeof base.alwaysOnTop === "boolean") out.alwaysOnTop = base.alwaysOnTop;
   if (base.model === null) out.model = null;
   else {
     const model = sanitizeModelPreference(base.model);
@@ -152,6 +162,14 @@ export function normalizeSettings(input, fallback = DEFAULT_SETTINGS) {
   }
 
   if (typeof input.noFocusSteal === "boolean") out.noFocusSteal = input.noFocusSteal;
+
+  // 主题：非法值**静默忽略**（保持原值），不要因为一个拼错的主题把整次设置写入搞崩
+  if (typeof input.theme === "string" && THEME_IDS.includes(input.theme)) out.theme = input.theme;
+
+  // 联网总开关：只认 boolean（字符串 "false" 不算，避免前端传错类型时静默反转语义）
+  if (typeof input.webEnabled === "boolean") out.webEnabled = input.webEnabled;
+  // 置顶开关：同上，只认 boolean（默认 false = 不置顶，用户 2026-10-20）
+  if (typeof input.alwaysOnTop === "boolean") out.alwaysOnTop = input.alwaysOnTop;
 
   if (input.model === null) out.model = null;
   else if (input.model !== undefined) {
@@ -269,28 +287,16 @@ export class SettingsStore {
     }
 
     const merged = structuredClone(this._data);
-    if (typeof partial.noFocusSteal === "boolean") merged.noFocusSteal = partial.noFocusSteal;
-    if (partial.model === null) merged.model = null;
-    else if (partial.model !== undefined) {
-      const model = sanitizeModelPreference(partial.model);
-      if (model) merged.model = model;
-    }
-    if (typeof partial.sceneId === "string") merged.sceneId = partial.sceneId;
-    if (isSafeInt(partial.version) && partial.version > 0) merged.version = partial.version;
-    if (isPlainObject(partial.window)) {
-      if (typeof partial.window.state === "string" && WINDOW_STATE_IDS.includes(partial.window.state)) {
-        merged.window.state = partial.window.state;
-      }
-      if (isPlainObject(partial.window.positions)) {
-        for (const state of WINDOW_STATE_IDS) {
-          if (!(state in partial.window.positions)) continue;
-          const p = sanitizePosition(partial.window.positions[state]);
-          if (p) merged.window.positions[state] = p;
-        }
-      }
-    }
-
-    this._data = normalizeSettings(merged, merged);
+    /* ⚠ 这里**不再逐键 if**。曾经的写法是「又抄一遍已知键列表」：
+       `noFocusSteal / model / sceneId / version / window` 各写一个分支 ——
+       结果新增 `theme` 时，白名单（ALLOWED_TOP_KEYS）与归一化都改了，
+       唯独这个合并函数没改，于是 `set({theme})` 被**静默丢弃**，
+       表现为「设置页点浅色/深色毫无反应」（2026-10-20 定位到的真因）。
+       现在统一交给 normalizeSettings(partial, merged) 一处处理：
+       键的合法性与取值边界只在一个地方定义，加新键不会再漏第二处。
+       ⚠ 参数顺序是 (input, fallback)——**第一个才是覆盖值**。写反了不会报错，
+       只会安静地"什么都没改"（我第一次就写反了，靠往返测试才发现）。 */
+    this._data = normalizeSettings(partial, merged);
     this.persist();
     return this.get();
   }

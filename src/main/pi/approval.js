@@ -53,6 +53,7 @@ import path from "node:path";
 
 import {
   APPROVAL_ACTION_IDS,
+  APPROVAL_ACTIONS,
   APPROVAL_TOOLS,
   ERROR_CODES,
   LIMITS,
@@ -82,8 +83,65 @@ export const DENY_REASON_USER =
 export const DENY_REASON_TERMINATE =
   "The user chose to stop this turn. All further actions in this turn are aborted. Do not retry any action; wait for the user's next instruction.";
 
+/** 「拒绝并说明」里用户那句话的长度上限（字符）。防把整段文档塞回模型烧 token。 */
+const MAX_INSTRUCTION_CHARS = 500;
+
+/**
+ * 把用户在「拒绝并说明」里填的一句话整理成回灌文案。**纯函数**。
+ *
+ * 为什么要包一层固定前言：模型只看到 `{block:true, reason}`，不会自动理解
+ * 「这是一句人类指导」；不点明的话它容易把这句话当成系统错误描述，继续原地重试。
+ *
+ * @param {unknown} raw
+ * @returns {string} 空串表示用户没填（调用方回落到 `DENY_REASON_USER`）
+ */
+export function normalizeDenyInstruction(raw) {
+  if (typeof raw !== "string") return "";
+  const s = raw.replace(/[\r\n]+/g, " ").trim().slice(0, MAX_INSTRUCTION_CHARS);
+  if (s.length === 0) return "";
+  return `The user denied this action and asked for something different: ${s}\nDo not retry the same action unchanged; follow the instruction above.`;
+}
+
 /** 三类卡的 kind 取值域（与 `protocol.js` `ApprovalBatchItem.kind` 一致）。 */
 export const APPROVAL_KINDS = Object.freeze(["write", "edit", "command"]);
+
+/**
+ * 参与「本会话允许此文件」记忆的工具——**只有会写盘的两个**。
+ *
+ * 设计口径（2026-10-21 用户定：安全为主、简单为辅）：
+ *   · **按单个文件全等匹配**，不按工具名（一次点击 = 全会话任意写，太粗）；
+ *   · 也不按路径前缀（前缀匹配有 `docs` vs `docs2` 的经典误放坑，且要处理分隔符边界）；
+ *   · **单槽记忆**：只记最近批准的那一个文件，换文件即失效——不需要清理逻辑，风险窗口最短。
+ */
+const FILE_SCOPED_TOOLS = Object.freeze(["write", "edit"]);
+
+/** `~` 展开（approval.js 刻意不 import scenes.js，避免多一层依赖）。 */
+function expandTilde(p) {
+  if (typeof p !== "string" || p.length === 0) return p;
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+/**
+ * 把一次调用归一成「文件记忆比较键」。**纯函数**。
+ *
+ * 返回空串 = 这次调用不参与文件记忆（非 write/edit、或缺 path）。
+ * Windows 下大小写不敏感（NTFS 语义），其它平台按原样。
+ *
+ * @param {string} toolName
+ * @param {unknown} input
+ * @param {string} cwd
+ * @returns {string}
+ */
+export function fileAllowKey(toolName, input, cwd) {
+  if (!FILE_SCOPED_TOOLS.includes(String(toolName))) return "";
+  const raw = input?.path;
+  if (typeof raw !== "string" || raw.trim().length === 0) return "";
+  const abs = path.resolve(String(cwd || process.cwd()), expandTilde(raw.trim()));
+  const norm = path.normalize(abs).replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? norm.toLowerCase() : norm;
+}
 
 /** 工具的 kind 归类（`powershell` 与 `bash` 同属 `command`，设计 §3.4）。 */
 const TOOL_KIND = Object.freeze({
@@ -146,9 +204,9 @@ const HIGH_RISK_PATTERNS = Object.freeze([
  * **pattern B（前缀形态，P2-1 修复）**：`前缀+关键字 <sep> value`，前缀 ∈ `[A-Za-z0-9_]*`，
  * 关键字 ∈ {TOKEN, SECRET, PASSWORD, PASSWD, API_KEY, ACCESS_KEY, PRIVATE_KEY}。
  *
- * ⚠ **为什么是两条而不是把 A 的 `\b` 放宽**（team-lead 裁定，秦戈提的选项）：
+ * ⚠ **为什么是两条而不是把 A 的 `\b` 放宽**（team-lead 裁定，安全评审提的选项）：
  *   `\b` 在 `_` 处不成立（`_` 是词字符）⇒ `SECRET_TOKEN=` / `GITHUB_TOKEN=` / `AWS_SECRET_ACCESS_KEY=`
- *   / `DB_PASSWORD=` 里的关键字**匹配不上**，值整个明文落盘（秦戈 QA 实证 5 例泄漏）。
+ *   / `DB_PASSWORD=` 里的关键字**匹配不上**，值整个明文落盘（安全评审 QA 实证 5 例泄漏）。
  *   可选修法有「把 A 的 `\b` 换成零宽后顾放宽」与「补一条 B」。**选 B**：
  *     1. 零宽后顾有兼容风险（主进程 + 纯 Node 双跑），且会**改变既有 7 形态的匹配行为**，回归面大；
  *     2. 补一条 B **只增不减**，A 的 7/7 既有形态逐字不变，风险最小；
@@ -596,7 +654,8 @@ export class ApprovalGate {
      * **只在内存**——不落盘、退出即失（任务 #3 拍板：会话级、默认关、不持久化）。
      * 只能由 IPC 的 `decide({action:"allowOnce", remember:true})` 写入（模型输入到不了 decide）。
      */
-    this._alwaysAllow = new Map();
+    /** @type {Map<string,string>} 会话 → 最近一次批准可直接写的**文件键**（单槽，换文件即失效） */
+    this._allowFile = new Map();
     this._counter = 0;
     this._flushTimer = null;
 
@@ -636,8 +695,9 @@ export class ApprovalGate {
 
     // R5：本会话已「总是允许」该工具 ⇒ 直接放行、不再推卡（只免审批，不免沙箱——
     // 沙箱由 session.js 规则 1 在本方法**之前**判定，这里到不了沙箱违例）
-    const allowedTools = this._alwaysAllow.get(sessionId);
-    if (allowedTools && allowedTools.has(toolName)) {
+    // 「本会话允许此文件」：只有**同一个文件**才短路；换文件必须重新问（安全为主）
+    const allowKey = fileAllowKey(toolName, call?.input, call?.cwd ?? "");
+    if (allowKey && this._allowFile.get(sessionId) === allowKey) {
       return { action: "allowOnce" };
     }
 
@@ -655,6 +715,8 @@ export class ApprovalGate {
     const existing = existingId ? this._pending.get(existingId) : null;
     if (existing && existing.items.length < this._batchMax) {
       existing.items.push(item);
+      // 批合并后无法归一到单一文件 ⇒ 这张卡不能再开「本会话允许此文件」
+      existing.allowKey = "";
       this._pushCard(existing, "update");
       return new Promise((resolve) => {
         existing.resolvers.push(resolve);
@@ -669,6 +731,8 @@ export class ApprovalGate {
       sessionId,
       sceneId: String(call?.sceneId ?? ""),
       items: [item],
+      /** @type {string} 这张卡对应的文件键（空 = 不可开文件级记忆；批合并后清空） */
+      allowKey: fileAllowKey(toolName, call?.input, call?.cwd ?? ""),
       createdAt: now,
       expiresAt: now + this._timeoutMs,
       /** @type {Array<Function>} 同一卡可能对应多个并发 request（批内各调用各自 await） */
@@ -706,10 +770,14 @@ export class ApprovalGate {
    */
   decide(arg) {
     const approvalId = String(arg?.approvalId ?? "");
-    const action = String(arg?.action ?? "");
+    const rawAction = String(arg?.action ?? "");
 
-    if (action !== "allowOnce" && action !== "deny" && action !== "terminate") {
-      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "action 必须是 allowOnce / deny / terminate"));
+    // 兼容：旧渲染层/旧测试传 `deny` ⇒ 等价于「拒绝并说明」但没填说明（回落到默认拒绝文案）。
+    const action = rawAction === "deny" ? "denyWithInstruction" : rawAction;
+    if (!APPROVAL_ACTIONS.includes(action)) {
+      throw new Error(
+        errorMessage(ERROR_CODES.INVALID_ARGUMENT, `action 必须是 ${APPROVAL_ACTIONS.join(" / ")} 之一`),
+      );
     }
 
     const entry = this._pending.get(approvalId);
@@ -717,16 +785,25 @@ export class ApprovalGate {
       throw new Error(errorMessage(ERROR_CODES.APPROVAL_NOT_FOUND, "审批不存在或已决"));
     }
 
-    // R5：只有带 remember:true 的 IPC 决策能开「本会话总是允许」（默认关、仅内存）
-    // ⚠ 模型任何输入都到不了这里（decide 只由 IPC handler 调），故 remember 不可能被模型伪造。
-    if (arg?.remember === true && action === "allowOnce") {
-      this._enableAlwaysAllow(entry);
+    // 「本会话始终允许」两个入口：新四档的 allowSession，以及旧的 allowOnce + remember:true。
+    // ⚠ 只有带 remember:true 的 IPC 决策能开（默认关、仅内存）；模型任何输入都到不了 decide。
+    const remember =
+      action === "allowSession" || (arg?.remember === true && action === "allowOnce");
+    if (remember) this._enableAlwaysAllow(entry);
+
+    if (action === "allowOnce" || action === "allowSession") {
+      // 两者对下游都是「放行这一次」；区别只在有没有写会话级记忆（上面那步）。
+      this._settle(entry, "allowOnce", null);
+      return { ok: true };
     }
 
-    // R3：按 action 分派拒绝文案（三套分开；timeout/cancelBySession 各自用各自的，见下）
-    const reason =
-      action === "allowOnce" ? null : action === "terminate" ? DENY_REASON_TERMINATE : DENY_REASON_USER;
-    this._settle(entry, action, reason);
+    if (action === "terminate") {
+      this._settle(entry, "terminate", DENY_REASON_TERMINATE);
+      return { ok: true };
+    }
+
+    // denyWithInstruction：用户那句指导就是回灌文案（空则回落默认拒绝文案）
+    this._settle(entry, "deny", normalizeDenyInstruction(arg?.instruction) || DENY_REASON_USER);
     return { ok: true };
   }
 
@@ -739,7 +816,7 @@ export class ApprovalGate {
   cancelBySession(sessionId) {
     const id = this._sessionCard.get(String(sessionId));
     // 即便没有未决卡，也要清掉该会话的 always-allow 记忆（会话没了，记忆无意义）
-    this._alwaysAllow.delete(String(sessionId));
+    this._allowFile.delete(String(sessionId));
     if (!id) return 0;
     const entry = this._pending.get(id);
     if (!entry || entry.settled) {
@@ -760,13 +837,9 @@ export class ApprovalGate {
   _enableAlwaysAllow(entry) {
     const meta = cardMeta(entry);
     if (!meta.alwaysAllowEligible || !meta.toolName) return;
-    let set = this._alwaysAllow.get(entry.sessionId);
-    if (!set) {
-      set = new Set();
-      this._alwaysAllow.set(entry.sessionId, set);
-    }
-    if (set.has(meta.toolName)) return;
-    set.add(meta.toolName);
+    if (!entry.allowKey) return;
+    if (this._allowFile.get(entry.sessionId) === entry.allowKey) return;
+    this._allowFile.set(entry.sessionId, entry.allowKey);
     // 审计：开启当刻记一笔（脱敏，无参数内容）
     try {
       this._bridge.audit({
@@ -776,7 +849,7 @@ export class ApprovalGate {
         event: "always_allow_enabled",
         kind: meta.kind,
         toolName: meta.toolName,
-        summary: `本会话总是允许 ${meta.toolName}（内存级，退出即失）`,
+        summary: `本会话允许改「${path.basename(entry.allowKey) || meta.toolName}」（只对该文件；内存级，退出即失）`,
         risk: null,
       });
     } catch (err) {
@@ -785,9 +858,9 @@ export class ApprovalGate {
   }
 
   /** 查询某会话是否已「总是允许」某工具（测试用）。 */
-  isAlwaysAllowed(sessionId, toolName) {
-    const set = this._alwaysAllow.get(String(sessionId));
-    return !!set && set.has(String(toolName));
+  isAlwaysAllowed(sessionId, toolName, filePath) {
+    const key = fileAllowKey(toolName, { path: filePath }, process.cwd());
+    return !!key && this._allowFile.get(String(sessionId)) === key;
   }
 
   /* --------------------------- 内部 --------------------------- */
@@ -838,7 +911,7 @@ export class ApprovalGate {
 
   /** 推卡（push / update → 完整卡；cancel → 只带 id + phase）。 */
   _pushCard(entry, phase) {
-    // phase:"cancel" 只带 id + phase（撤回卡不需要内容，方砚据此移除；§9.3）
+    // phase:"cancel" 只带 id + phase（撤回卡不需要内容，前端据此移除；§9.3）
     if (phase === "cancel") {
       try {
         this._bridge.pushCard({
@@ -865,7 +938,7 @@ export class ApprovalGate {
       createdAt: entry.createdAt,
       expiresAt: entry.expiresAt,
       timeoutMs: this._timeoutMs,
-      // R4：渲染层靠 actions 画按钮（三值恒发，方砚缺它画不出按钮）
+      // R4：渲染层靠 actions 画按钮（三值恒发，前端缺它画不出按钮）
       actions: APPROVAL_ACTION_IDS,
       kind: meta.kind,
       toolName: meta.toolName,
@@ -1052,8 +1125,10 @@ export function cardMeta(entry) {
     kind: first?.kind ?? null,
     toolName: first?.toolName ?? null,
     title,
-    // 只有「单工具」批才可能被「本会话总是允许」覆盖（混合工具 ⇒ 不可）
-    alwaysAllowEligible: singleTool,
+    // 「本会话允许此文件」的两个前提（2026-10-21 安全口径）：
+    //   ① 单工具批（混合工具无法归一到单一文件）；
+    //   ② 该工具是**会写盘**的 write / edit（命令类无"文件"可记，且产品内已无 bash）。
+    alwaysAllowEligible: singleTool && FILE_SCOPED_TOOLS.includes(String(first?.toolName ?? "")),
     mixedKind,
   };
 }

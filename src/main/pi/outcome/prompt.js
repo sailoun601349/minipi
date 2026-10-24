@@ -96,28 +96,194 @@ export function buildOutcomePrompt({ intent, sourceText, format } = {}) {
 }
 
 /**
+ * 提示词硬顶 —— **必须与 `shared/protocol.js` 的 `LIMITS.PROMPT_MAX_CHARS` 保持一致（32000）**。
+ *
+ * 为什么不直接 import 那个常量：本模块是**零依赖纯函数**层（可被任意环境单独拉起做单测，
+ * 也是它当初不 import 任何东西的原因）。所以这里只能自己写一份，并在注释里钉住同步责任。
+ *
+ * 为什么必须在这里就压住：`session.js:generateStructured()` 对超长 instruction 是
+ * **硬抛 `INVALID_ARGUMENT`**（不是降级）⇒ 提示词超顶 = 导出直接失败，用户什么也拿不到。
+ */
+const MAX_PROMPT_CHARS = 32000;
+
+/**
+ * 回灌「上一次输出」的长度上限。
+ *
+ * 取**头部**而不是尾部：模型回的是 JSON，从 `{` 开始，砍掉头等于砍掉契约起点。
+ *
+ * 为什么是 20000 而不是更小的值：修正要求是「输出**完整** JSON」，若只贴头部，
+ * 尾部章节会被静默砍掉，模型照着残片补完**照样能过校验** ⇒ 用户拿到少了几节的成稿，
+ * 而且没有任何降级标记。宁可让极长输出多占点 token，也不要静默丢内容。
+ *
+ * ⚠ 这只是**上限**，真正能贴多少由 `buildRetryPrompt()` 里「先量后切」算出来的 `room` 决定。
+ */
+const PREV_OUTPUT_MAX_CHARS = 20000;
+
+/**
+ * 回灌「上一次输出」的**最小可用**长度。
+ *
+ * 额度不够时不是「能贴多少贴多少」，而是「够不够像一份原稿」：
+ * 只剩几百字的时候，贴给模型的是半个字段名（`{"title":"周报","sections":[{"head`），
+ * 而文案同时写着「这是你上一次的输出」+「请输出**完整** JSON」——
+ * 模型极可能顺着残片**补完**而不是**修正**，用户拿到的就是一份悄悄缺了章节的成稿。
+ * 与其塞个假原稿，不如明说「上一次输出过长，已省略」，让它按 base（意图 + 素材 + 契约）重写。
+ *
+ * 2000 的依据：一份能成为「原稿」的最小产出，至少要装得下标题 + 两三节的 heading/bullets；
+ * 再少就只剩结构骨架，修正价值低于误导风险。
+ */
+const PREV_OUTPUT_MIN_CHARS = 2000;
+
+/**
  * 第一次校验失败后的「修正」提示词。
  *
  * 为什么要把 errors 列表原样回灌：模型看到「`sections 第 3 项的 bullets 不是数组`」
  * 这种**具体**报错，修正命中率远高于含糊的「格式不对，重来」。
  * 同时要求它「只输出修正后的完整 JSON」——防止它只回一个有问题的片段。
  *
+ * ## 为什么还要把「完整产出要求」重新贴一遍（`context`）
+ *
+ * 导出走的是 `completeSimple` **一次性调用**：第二次请求是一条全新对话，
+ * 模型既看不到上一轮自己写了什么，也**看不到用户那句意图**与素材。
+ * 只回灌 errors + 残片的话，它不知道「要把什么整理成周报」——首版为空时重试必然写废，
+ * 直接掉进降级①。所以有 `context.intent` 时**复用 `buildOutcomePrompt()`**（不复制提示词）
+ * 把基准要求整段重贴，让重试请求自己就是一份完整请求。
+ *
+ * ## 为什么还要把上一次的输出本身贴回来（`prevText`）
+ *
+ * 同上：模型**看不到**上一轮输出。只回灌 errors 等于让它凭空重写一遍，
+ * 既不知道错在哪段文本，也无法「在原稿上改」。
+ *
+ * ## 长度：先量后切（⚠ 别改回「扣一个固定余量」）
+ *
+ * 这里的长度是**双向**约束：超 `MAX_PROMPT_CHARS` 会被 `generateStructured` 硬拒
+ * （`INVALID_ARGUMENT`，`OutcomeService.generate()` 不 catch ⇒ 整次导出失败，连降级①都没有）；
+ * 切太狠又等于砍内容。所以不能靠拍脑袋的常数预留 —— 上一版用固定
+ * `RETRY_OVERHEAD_RESERVE = 1200`，遇到「大素材 + 50 条 errors」实测拼出 33k 直接超顶。
+ *
+ * 现在改成**同一段拼装逻辑量两遍**：
+ *   ① `assemble("")` ⇒ 量出固定部分（base + 修正块 + **完整 errors 列表**）的真实长度；
+ *   ② `assemble("X")` ⇒ 再量出「上一轮输出块」的包装开销（说明行 + 上下分隔 + 空行）；
+ *   ③ 剩余额度 `room = MAX_PROMPT_CHARS − fixed − overhead` 才是 prev 的。
+ * 末尾还有一道「拼出来再核一次、超了就再切」的收敛，保证**永不返回超顶字符串**：
+ * 宁可少贴一点上一轮输出，也不能让整次导出失败。
+ *
+ * ⚠ 向后兼容：`prevText` 缺省 / 空 / 非字符串、且 `context.intent` 为空时，
+ *   输出与引入这两个参数前**逐字一致**（旧调用点、旧测试与 `verify-outcome.mjs:470` 依赖它）。
+ *
  * @param {string[]} errors `validateOutcome` 给的错误列表（可读中文）
- * @returns {string} 修正用提示词
+ * @param {string} [prevText] 上一次模型输出的原文（可能被截断过）
+ * @param {{ intent?: string, sourceText?: string, format?: "md"|"docx" }} [context]
+ *        首次请求的入参；给了 `intent` 才会把完整产出要求重贴一遍
+ * @returns {string} 修正用提示词，长度**保证** ≤ `MAX_PROMPT_CHARS`
  */
-export function buildRetryPrompt(errors) {
+export function buildRetryPrompt(errors, prevText, context) {
   const list = Array.isArray(errors) && errors.length > 0 ? errors : ["JSON 结构不符合契约"];
-  return [
-    "你上一次的输出不符合要求，请修正后重新输出。",
-    "",
-    "发现的问题：",
-    ...list.map((e) => `  - ${String(e)}`),
-    "",
-    "要求：",
-    "- 只输出修正后的**完整** JSON（不是片段、不是 diff）。",
-    "- 不要 markdown 代码围栏，不要任何解释文字。",
-    "- 第一个字符必须是 {，最后一个字符必须是 }。",
-  ].join("\n");
+
+  // 有 intent 才插 base：没有 intent 的调用点（旧代码 / 单测）必须保持逐字不变。
+  const intent = typeof context?.intent === "string" ? context.intent.trim() : "";
+  let sourceText = typeof context?.sourceText === "string" ? context.sourceText : "";
+  /**
+   * base 用 `let`：越界入参（`sourceText` 远超产品上限）时下面会**先削素材再谈截断**，
+   * 因为「保住修正指令」比「保住素材全文」重要 —— 详见兜底那一节。
+   */
+  let base = intent.length > 0 ? buildOutcomePrompt({ intent, sourceText, format: context?.format }) : "";
+
+  const rawPrev = typeof prevText === "string" ? prevText.trim() : "";
+  const hasPrev = rawPrev.length > 0;
+
+  /**
+   * 唯一拼装入口 —— 量长度与出成品**必须走同一段代码**。
+   * 上一版就是「量的是一套、拼的是另一套」（预留余量没算 errors 列表）才翻的车。
+   *
+   * @param {string} prevBody 要贴回的上一轮输出（空串 = 不贴）
+   * @param {boolean} omitted 上一轮输出因超长被整段丢弃时置 true（只影响文案）
+   * @returns {string}
+   */
+  const assemble = (prevBody, omitted) => {
+    /** @type {string[]} */
+    const lines = [];
+    if (base.length > 0) lines.push(base, "", "===== 修正要求 =====");
+    lines.push("你上一次的输出不符合要求，请修正后重新输出。", "");
+
+    if (prevBody.length > 0) {
+      lines.push(
+        "注意：这是一次独立调用，你看不到上一次的对话，只能依据下面这段输出修正。",
+        "",
+        "===== 你上一次的输出（可能已截断） =====",
+        prevBody,
+        "===== 上一次输出结束 =====",
+        "",
+      );
+    } else if (omitted) {
+      // 额度被 base 吃光 ⇒ 宁可让模型整篇重写，也不要把请求顶到硬顶之外
+      lines.push("注意：这是一次独立调用，你看不到上一次的对话。上一次输出过长，已省略。", "");
+    }
+
+    lines.push(
+      "发现的问题：",
+      ...list.map((e) => `  - ${String(e)}`),
+      "",
+      "要求：",
+      "- 只输出修正后的**完整** JSON（不是片段、不是 diff）。",
+      "- 不要 markdown 代码围栏，不要任何解释文字。",
+      "- 第一个字符必须是 {，最后一个字符必须是 }。",
+    );
+    return lines.join("\n");
+  };
+
+  // ---- 先量后切 ----
+  // 包装开销与 base 无关（只是说明行 + 上下分隔 + 空行），用 1 个字符的探针量差值
+  const overhead = assemble("X", false).length - assemble("", false).length - 1;
+
+  /**
+   * 按**当前** base 算「prev 能贴多少」并出成品。
+   * 抽成闭包是为了让 `base` 被收敛逻辑缩短后，量长度与拼装仍然走同一段代码。
+   * @returns {{ prev: string, out: string }}
+   */
+  const layout = () => {
+    const fixed = assemble("", false).length; // base + 修正块 + 完整 errors 列表
+    const room = Math.max(0, MAX_PROMPT_CHARS - fixed - overhead);
+    let p = rawPrev.slice(0, Math.min(PREV_OUTPUT_MAX_CHARS, room));
+    // 只有「被预算截过」且「截完不足最小可用长度」时才整段丢弃，改为明说已省略
+    // （见 PREV_OUTPUT_MIN_CHARS）。**原稿本来就这么短的不受影响** —— 那是真原稿，要原样贴回。
+    if (p.length < rawPrev.length && p.length < PREV_OUTPUT_MIN_CHARS) p = "";
+    return { prev: p, out: assemble(p, hasPrev && p.length === 0) };
+  };
+
+  let state = layout();
+
+  // ---- 收敛 1：量准了理论上不超顶；万一超了，先压 prev（多贴几字上一轮输出是奢侈品）----
+  if (state.out.length > MAX_PROMPT_CHARS && state.prev.length > 0) {
+    // 超出多少就从 prev 尾部切掉多少（多切 1 个字符免得因换行/四舍五入卡住）
+    const cut = Math.min(state.prev.length, state.out.length - MAX_PROMPT_CHARS + 1);
+    state = { prev: state.prev.slice(0, state.prev.length - cut), out: "" };
+    state.out = assemble(state.prev, hasPrev && state.prev.length === 0);
+  }
+  if (state.out.length > MAX_PROMPT_CHARS && state.prev.length > 0) {
+    // 极端情况（固定部分已接近硬顶）：宁可完全不贴上一轮输出
+    state = { prev: "", out: assemble("", hasPrev) };
+  }
+
+  // ---- 收敛 2：连「不带 prev」都超顶 ⇒ base 自己越界（上游 sourceText 超范围）----
+  // 这时**削素材、保指令**：`发现的问题` / `要求：` 是这次重试唯一的有效载荷，
+  // 而素材是可再生的（首轮从会话历史再取一次就有）。反过来切尾部会先把
+  // 修正指令切光、把素材留满 —— 那次调用必然再错一遍，白烧。
+  if (state.out.length > MAX_PROMPT_CHARS && base.length > 0) {
+    for (let i = 0; i < 4 && state.out.length > MAX_PROMPT_CHARS && sourceText.length > 0; i += 1) {
+      // 按超出量线性削（留 200 字余量），最多四轮 —— 收敛目标是「不超顶」，不值得二分
+      sourceText = sourceText.slice(0, Math.max(0, sourceText.length - (state.out.length - MAX_PROMPT_CHARS) - 200));
+      base = buildOutcomePrompt({ intent, sourceText, format: context?.format });
+      state = layout();
+    }
+  }
+
+  if (state.out.length > MAX_PROMPT_CHARS) {
+    // ---- 最后一道闸：连 intent 都越界（base 无可再削）⇒ 硬切 ----
+    // 提示词尾部被切模型仍可能照 base 修正，而超顶会让整次导出直接失败（`INVALID_ARGUMENT`
+    // 硬抛、`generate()` 不 catch），两者代价不对等。
+    state.out = state.out.slice(0, MAX_PROMPT_CHARS);
+  }
+  return state.out;
 }
 
 /**

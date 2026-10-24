@@ -535,6 +535,306 @@ if (!CHROME) {
     const removed = await evaluate("window.__minipi.__providerWrites()");
     const rmCall = removed.find((x) => x.kind === 'removeProvider');
     ok(Boolean(rmCall) && rmCall.arg.provider === 'qa-gateway', "确认后才真的删除", String(rmCall?.arg?.provider));
+
+    /* ==================================================================
+     * [C] 首启引导卡（ready:false 时贴在聊天区）
+     *
+     * ⚠ 这一段**重新导航**到一个注入了「假真宿主」的页面，而不是沿用上面的 mock 页。
+     *   理由：内置 mock 的 `modelStatus()` 恒返回 `{ready:true}`，且 `mockHost` 没暴露给
+     *   任何探针 —— 也就是说在 mock 页里**无法**让 `refreshModelStatus()` 走到真实 IPC 分支、
+     *   也无法统计调用次数、更无法让它 reject。而这一组要验的恰恰是那条链路
+     *   （`refreshModelStatus() → host.modelStatus() → store.modelStatus → 渲染`）。
+     *   换成注入宿主后 `window.minipi` 存在 ⇒ `realHost` 非空 ⇒ 走**真实宿主分支**，
+     *   所有调用可被记账。这与 `qa-session-list.mjs` 的做法一致（那边已验证可行）。
+     * ================================================================== */
+    group("[C] 首启引导卡：ready:false 出现 / ready:true 消失 / 去配置 / 不泄露 / 无 svg / IPC 契约");
+
+    const GUIDE_SENTINEL = "QA-GUIDE-SENTINEL-7f3a9c";
+    const FAKE_HOST = `(() => {
+      const calls = [];
+      const record = (k, a) => { calls.push({ k, a }); };
+      /* 初始状态由 URL **query** 决定 —— 这样「重新导航」就等于一次真冷启动，
+         可以在 boot() 那一刻就让 modelStatus reject / 返回非对象，
+         而不是只能在页面内事后打补丁（那只测得到 store，测不到 boot 路径）。
+         ⚠ 必须用 query 而不是 hash：file:///x.html#a → #b 是**同文档**导航，
+           不会重新执行页面脚本，连 addScriptToEvaluateOnNewDocument 都不会重跑。
+           第一版我用了 hash，结果拿到的是上一轮残留的 store（假红一片）。
+         ⚠ 本段整体在模板字符串里，注释里**不要写反引号**（会提前闭合）。 */
+      const Q = String(location.search || '');
+      let statusMode =
+        Q.includes('reject') ? 'reject' :
+        Q.includes('nonobject') ? 'nonobject' :
+        Q.includes('ready') ? 'ready' : 'sentinel';
+      window.__qaGuide = {
+        calls,
+        count(kind) { return calls.filter((c) => c.k === kind).length; },
+        last(kind) { const h = calls.filter((c) => c.k === kind); return h.length ? h[h.length - 1] : null; },
+        setStatusMode(m) { statusMode = m; return statusMode; },
+        getStatusMode() { return statusMode; },
+        reset() { calls.length = 0; statusMode = 'sentinel'; return true; },
+      };
+      const ok = () => Promise.resolve({ ok: true });
+      window.minipi = {
+        modelStatus() {
+          record('modelStatus');
+          if (statusMode === 'reject') return Promise.reject(new Error('QA-GUIDE-REJECT-BOOM'));
+          if (statusMode === 'nonobject') return Promise.resolve(null);
+          if (statusMode === 'ready') return Promise.resolve({ ready: true, reason: '' });
+          return Promise.resolve({ ready: false, reason: '${GUIDE_SENTINEL}' });
+        },
+        createSession() {
+          record('createSession');
+          return Promise.resolve({ sessionId: 's_guide_0001', sceneId: 'chat', model: 'mock/model', lastSeq: 0 });
+        },
+        sessionState() { return Promise.resolve({ status: 'idle', lastSeq: 0, messageCount: 0, costUsd: null }); },
+        listSessions() { return Promise.resolve({ items: [] }); },
+        getSettings() { return Promise.resolve({ webEnabled: true, alwaysOnTop: false, sceneId: 'chat', theme: 'system' }); },
+        setSettings(p) { record('setSettings', p); return Promise.resolve({ webEnabled: true, alwaysOnTop: false, sceneId: 'chat' }); },
+        getAbout() {
+          return Promise.resolve({ minipi: { version: 'qa', electron: '0', chrome: '0', node: '0', platform: 'qa' }, pi: { name: 'pi', version: '0', aiVersion: '0' }, consistent: true });
+        },
+        listModels() { return Promise.resolve({ current: null, defaultModel: null, models: [] }); },
+        listProviders() { return Promise.resolve({ current: null, defaultModel: null, featured: [], providers: [] }); },
+        listAssets() { return Promise.resolve({ items: [] }); },
+        onWindowState() { return () => {}; },
+        onEvent() { return () => {}; },
+        onHotkey() { return () => {}; },
+        onOutcome() { return () => {}; },
+        onApproval() { return () => {}; },
+        onBallPeek() { return () => {}; },
+        onBallMenuClosed() { return () => {}; },
+        setWindowState() { return ok(); },
+        hide() { return ok(); },
+      };
+      return true;
+    })()`;
+
+    await conn.send("Page.enable");
+    await conn.send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_HOST });
+    await conn.send("Page.navigate", { url: `file:///${HTML_PATH.replace(/\\/g, "/")}` });
+
+    let ready2 = false;
+    for (let i = 0; i < 40; i += 1) {
+      try {
+        ready2 = await evaluate("document.readyState === 'complete' && !!window.__qaGuide && !!window.__minipi && !!document.querySelector('#miniBody')");
+        if (ready2) break;
+      } catch {
+        /* 页面还在加载 */
+      }
+      await sleep(250);
+    }
+    ok(ready2, "（前置）重新导航后假真宿主已注入，渲染层走**真实宿主分支**");
+
+    if (!ready2) throw new Error("注入宿主后页面未就绪，[C] 组无法执行");
+
+    /* 等 boot() 里的 void refreshModelStatus() 落定 */
+    for (let i = 0; i < 20; i += 1) {
+      const st = await evaluate("window.__minipi.modelStatus()");
+      if (st && st.ready === false) break;
+      await sleep(150);
+    }
+    await sleep(400);
+
+    /* ------------------------------------------------------------ C1 */
+    const c1 = await evaluate(`(() => {
+      const card = document.querySelector('.modelguide');
+      const body = document.querySelector('#miniBody');
+      return {
+        exists: !!card,
+        text: card ? card.textContent : '',
+        title: card ? (card.querySelector('.modelguide__t') || {}).textContent || '' : '',
+        inMiniBody: !!(card && body && body.contains(card)),
+        status: window.__minipi.modelStatus(),
+        calls: window.__qaGuide.count('modelStatus'),
+      };
+    })()`);
+
+    ok(c1.exists === true, "★ ready:false 时聊天区出现引导卡 .modelguide");
+    ok(c1.inMiniBody === true, "卡片挂在 #miniBody（聊天区）里，不是别处");
+    ok(c1.title === "还不能对话", "卡片标题是「还不能对话」", String(c1.title));
+    ok(
+      c1.text.includes(GUIDE_SENTINEL),
+      "★ 卡片文本含主进程给的 reason 哨兵（不是只渲染固定文案、把 reason 丢了）",
+      `含哨兵=${c1.text.includes(GUIDE_SENTINEL)}`,
+    );
+    ok(c1.status && c1.status.ready === false, "store.modelStatus 已被 refreshModelStatus 写入", JSON.stringify(c1.status));
+    ok(c1.calls >= 1, "★ host.modelStatus 被调用（IPC 链路真的走通了）", `调用 ${c1.calls} 次`);
+
+    /* ------------------------------------------------------------ C2 */
+    const c2 = await evaluate(`(() => {
+      const card = document.querySelector('.modelguide');
+      const text = card ? card.textContent : '';
+      return {
+        hasSk: /sk-/.test(text),
+        /* 老缺陷的泄露形状是 ~/.pi（Pi 自己的目录）。
+           注意 ~ 与 . 之间还有一个 /，所以正则必须写成 ~\\/\\.pi。
+           第一版我写成 ~\\.minipi（漏了斜杠），结果对照组红、而"不含"的那条假绿。 */
+        hasPiDir: /~\\/\\.pi\\b/.test(text),
+        hasMinipiDir: /~\\/\\.minipi/.test(text),
+        text,
+      };
+    })()`);
+    ok(c2.hasSk === false, "★ 卡片文本里没有 `sk-`（不泄露 key 形状）", `text=${String(c2.text).slice(0, 120)}`);
+    ok(c2.hasPiDir === false, "★ 卡片文本里没有 `~/.pi`（第 2 阶段修掉的老缺陷不许从引导卡爬回来）", `text=${String(c2.text).slice(0, 160)}`);
+    ok(c2.hasMinipiDir === true, "对照：允许并鼓励出现 `~/.minipi`（这是我们自己的目录，用于「只存本机」的信任文案）", `含=${c2.hasMinipiDir}`);
+
+    /* ------------------------------------------------------------ C3 */
+    const c3 = await evaluate(`(() => {
+      const card = document.querySelector('.modelguide');
+      if (!card) return { svgs: -1, iconSpans: -1, masks: -1 };
+      return {
+        svgs: card.querySelectorAll('svg').length,
+        iconSpans: card.querySelectorAll('.iconSpan').length,
+        masks: card.querySelectorAll('[style*="mask"]').length,
+      };
+    })()`);
+    ok(
+      c3.svgs === 0,
+      "★ 卡片内没有任何 <svg>（插 svg 会被 qa-renderer-edge C5 判成 XSS）",
+      `svg=${c3.svgs} · iconSpan=${c3.iconSpans} · mask=${c3.masks}`,
+    );
+
+    /* ------------------------------------------------------------ C4 */
+    await evaluate("window.__qaGuide.reset(); window.__qaGuide.setStatusMode('sentinel')");
+    const c4 = await evaluate(`(() => {
+      const btn = document.querySelector('.modelguide [data-model-guide-open]');
+      const panelBefore = document.querySelector('#settingsPanel');
+      const beforeHidden = panelBefore ? panelBefore.hidden : null;
+      /* 数 **class** 而不是 id：id 计数只能抓到"又建了一个 id=settingsPanel 的"，
+         抓不到"建了个 settingsPanel2 / 换了 id 的新面板"（变异 M5 就是这么绕过去的）。 */
+      const panelsBefore = document.querySelectorAll('.settingsPanel').length;
+      if (btn) btn.click();
+      return { hadBtn: !!btn, beforeHidden, panelsBefore, label: btn ? btn.textContent : '' };
+    })()`);
+    await sleep(500);
+    const c4b = await evaluate(`(() => {
+      const panel = document.querySelector('#settingsPanel');
+      return {
+        panels: document.querySelectorAll('.settingsPanel').length,
+        hidden: panel ? panel.hidden : null,
+        visible: panel ? (!panel.hidden && getComputedStyle(panel).display !== 'none') : false,
+      };
+    })()`);
+    ok(c4.hadBtn === true, "卡片里有「去配置」按钮", String(c4.label).trim());
+    ok(c4.beforeHidden === true, "（前置）点之前设置面板是关着的", `hidden=${c4.beforeHidden}`);
+    ok(c4b.visible === true, "★ 点「去配置」→ 打开**现有** #settingsPanel（hidden=false 且可见）", `hidden=${c4b.hidden}`);
+    ok(
+      c4b.panels === c4.panelsBefore,
+      "★ 复用现有面板，没有新建第二个 .settingsPanel（设计约束：不许另造一套设置 UI）",
+      `点前 ${c4.panelsBefore} 个 / 点后 ${c4b.panels} 个`,
+    );
+
+    /* ------------------------------------------------------------ C5 */
+    await evaluate("document.querySelector('#btnSettingsClose') ? document.querySelector('#btnSettingsClose').click() : true");
+    await sleep(250);
+    /* 用 hash 控制宿主初始状态 ⇒ 重新导航 = 一次真冷启动，能测到 boot() 那条路径。 */
+    await conn.send("Page.navigate", { url: `file:///${HTML_PATH.replace(/\\/g, "/")}?v=ready` });
+    let ready3 = false;
+    for (let i = 0; i < 40; i += 1) {
+      try {
+        ready3 = await evaluate("document.readyState === 'complete' && !!window.__qaGuide && !!document.querySelector('#miniBody')");
+        if (ready3) break;
+      } catch {
+        /* loading */
+      }
+      await sleep(250);
+    }
+    await sleep(600);
+    const c5 = await evaluate(`(() => {
+      const st = window.__minipi.modelStatus();
+      return {
+        exists: !!document.querySelector('.modelguide'),
+        status: st,
+        calls: window.__qaGuide.count('modelStatus'),
+      };
+    })()`);
+    ok(ready3, "（前置）第二次导航就绪");
+    ok(
+      c5.status && c5.status.ready === true,
+      "（前置）本轮 modelStatus 返回 ready:true（宿主的返回值真的被渲染层读到了）",
+      JSON.stringify(c5.status),
+    );
+    ok(c5.exists === false, "★ ready:true 时不出现引导卡（不能一直挂着）");
+    ok(c5.calls >= 1, "ready:true 轮也真的调了 host.modelStatus", `调用 ${c5.calls} 次`);
+
+    /* ------------------------------------------------------------ C6 */
+    /* 冷启动就让 IPC reject：渲染层**不该**依赖主进程守约。
+       预期：不崩、不出现卡（读不到 ≠ 没有模型），而且没有未捕获错误冒到 window.onerror。 */
+    await evaluate(`(() => {
+      window.__qaErrors = [];
+      window.addEventListener('error', (e) => window.__qaErrors.push(String((e && e.message) || e)));
+      window.addEventListener('unhandledrejection', (e) => window.__qaErrors.push('unhandledrejection:' + String((e && e.reason && e.reason.message) || (e && e.reason) || '')));
+      return true;
+    })()`);
+    await conn.send("Page.navigate", { url: `file:///${HTML_PATH.replace(/\\/g, "/")}?v=reject` });
+    let ready4 = false;
+    for (let i = 0; i < 40; i += 1) {
+      try {
+        ready4 = await evaluate("document.readyState === 'complete' && !!window.__qaGuide && !!document.querySelector('#miniBody')");
+        if (ready4) break;
+      } catch {
+        /* loading */
+      }
+      await sleep(250);
+    }
+    await sleep(700);
+    const c6 = await evaluate(`(() => {
+      const st = window.__minipi.modelStatus();
+      return {
+        alive: !!document.querySelector('#miniBody') && !!document.querySelector('#sessList'),
+        exists: !!document.querySelector('.modelguide'),
+        status: st,
+        calls: window.__qaGuide.count('modelStatus'),
+        conn: window.__minipi.conn ? window.__minipi.conn() : null,
+      };
+    })()`);
+    ok(ready4, "（前置）reject 轮页面仍能加载完成（没有在 boot 阶段炸掉）");
+    ok(c6.calls >= 1, "★ reject 轮 host.modelStatus 确实被调用过（证明这轮真的走了 IPC）", `调用 ${c6.calls} 次`);
+    ok(c6.alive === true, "★ reject 时页面仍然可用（#miniBody / #sessList 都还在）");
+    ok(
+      c6.status === null || c6.status === undefined,
+      "★ reject 时不把「读不到」演成「没有模型」（store.modelStatus 保持 null）",
+      JSON.stringify(c6.status),
+    );
+    ok(c6.exists === false, "reject 时不出现引导卡（null ≠ ready:false）");
+
+    /* ------------------------------------------------------------ C7 */
+    /* 返回非对象（宿主违约的最坏形态）：`r.ready` 会 TypeError 吗？渲染层该兜住。 */
+    await conn.send("Page.navigate", { url: `file:///${HTML_PATH.replace(/\\/g, "/")}?v=nonobject` });
+    let ready5 = false;
+    for (let i = 0; i < 40; i += 1) {
+      try {
+        ready5 = await evaluate("document.readyState === 'complete' && !!window.__qaGuide && !!document.querySelector('#miniBody')");
+        if (ready5) break;
+      } catch {
+        /* loading */
+      }
+      await sleep(250);
+    }
+    await sleep(700);
+    const c7 = await evaluate(`(() => {
+      const st = window.__minipi.modelStatus();
+      return {
+        alive: !!document.querySelector('#miniBody'),
+        exists: !!document.querySelector('.modelguide'),
+        status: st,
+        calls: window.__qaGuide.count('modelStatus'),
+        text: (document.querySelector('.modelguide') || {}).textContent || '',
+      };
+    })()`);
+    ok(ready5, "（前置）非对象轮页面仍能加载完成");
+    ok(c7.calls >= 1, "非对象轮 host.modelStatus 确实被调用过");
+    ok(c7.alive === true, "★ 宿主返回 null（非对象）时渲染层不崩");
+    ok(
+      c7.status && c7.status.ready === false && c7.status.reason === '',
+      "★ 非对象按「未就绪」归一（ready:false / reason 空串），不是抛错也不是 undefined",
+      JSON.stringify(c7.status),
+    );
+    ok(
+      c7.exists === true && c7.text.includes('还没有配置模型'),
+      "★ 非对象 ⇒ 卡片用兜底文案（说明 reason 缺失时不能渲染出 undefined）",
+      `含兜底文案=${c7.text.includes('还没有配置模型')}`,
+    );
   } catch (err) {
     ok(false, `headless 断言执行异常：${err?.message ?? err}`);
   } finally {

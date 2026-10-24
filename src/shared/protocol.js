@@ -49,6 +49,24 @@ export const INVOKE = Object.freeze({
   PROMPT: "minipi:prompt",
   ABORT: "minipi:abort",
   SET_WINDOW_STATE: "minipi:setWindowState",
+  // 悬浮球右键菜单（v1.1）：为菜单临时撑开窗口 / 收起还原 / 隐藏悬浮窗。
+  // 菜单本身画在渲染层；主进程只管窗口几何，不改三态状态机。
+  SHOW_BALL_MENU: "minipi:showBallMenu",
+  HIDE_BALL_MENU: "minipi:hideBallMenu",
+  HIDE_BALL: "minipi:hideBall",
+  // 球态手动拖拽（整球可拖）：渲染层按屏幕像素位移 → 主进程 setPosition
+  /** 拖球三步（坐标全部在主进程用 OS 游标算，渲染层不传坐标） */
+  BALL_DRAG_BEGIN: "minipi:ballDragBegin",
+  BALL_DRAG_MOVE: "minipi:ballDragMove",
+  BALL_DRAG_END: "minipi:ballDragEnd",
+  /** 鼠标移入球（半隐藏时要把整个球滑出来） */
+  BALL_PEEK_IN: "minipi:ballPeekIn",
+  /** 鼠标移出球（立刻半隐藏回去） */
+  BALL_PEEK_OUT: "minipi:ballPeekOut",
+  /** 点了球（还原为不隐藏，3 秒后再半隐藏） */
+  BALL_PIN: "minipi:ballPin",
+  /** 球态拖拽结束：吸附到最近的左右屏幕边缘 */
+  SNAP_BALL: "minipi:snapBall",
   GET_SETTINGS: "minipi:getSettings",
   SET_SETTINGS: "minipi:setSettings",
   QUIT: "minipi:quit",
@@ -57,29 +75,78 @@ export const INVOKE = Object.freeze({
   OPEN_OUTCOME: "minipi:openOutcome",
   SAVE_OUTCOME_AS: "minipi:saveOutcomeAs",
   LIST_OUTCOMES: "minipi:listOutcomes",
+  // 抽屉页（D-14）：持久索引的读 / 删（进回收站）/ 定位
+  LIST_ASSETS: "minipi:listAssets",
+  OPEN_ASSET: "minipi:openAsset",
+  REMOVE_ASSET: "minipi:removeAsset",
+  REVEAL_ASSET: "minipi:revealAsset",
   // 模型配置（偏好与凭证管理）
   LIST_MODELS: "minipi:listModels",
   LIST_PROVIDERS: "minipi:listProviders",
   SET_MODEL: "minipi:setModel",
+  /** 「关于」：运行时探测的版本信息（minipi / Pi / Electron / Chromium / Node） */
+  GET_ABOUT: "minipi:getAbout",
+  /** 置顶开关（小窗/大窗通用）。@param {{ on: boolean }} → { ok, on } */
+  SET_ALWAYS_ON_TOP: "minipi:setAlwaysOnTop",
+  /** 最小化到任务栏（小窗/大窗通用）。→ { ok } */
+  MINIMIZE_WINDOW: "minipi:minimizeWindow",
   SET_API_KEY: "minipi:setApiKey",
   // 模型配置第二批：提供方定义（自定义提供方 / API 地址与模型目录覆盖 / 拉取模型清单）
   SET_PROVIDER: "minipi:setProvider",
   REMOVE_PROVIDER: "minipi:removeProvider",
   DISCOVER_MODELS: "minipi:discoverModels",
+  /**
+   * 只读：**模型是否就绪**（首启引导用）。
+   * → `{ ready: boolean, reason: string }`
+   *   · `ready:true` = 有可用模型（至少一个提供方已配凭据且模型目录非空）；
+   *   · `ready:false` 时 `reason` 是**给用户看的一句话**（中文），不是错误码。
+   * ⚠ 这个通道**永不 reject**：「读不出来」也是合法状态，抛错会把首启兜底
+   *   变成第二个故障点。也**绝不回传任何 key / 凭据**（D-03）。
+   */
+  MODEL_STATUS: "minipi:modelStatus",
   // M4 审批闸门（审批设计 §9.1）——渲染 → 主：用户点了「允许一次 / 拒绝 / 中断整轮」
   APPROVAL_DECIDE: "minipi:approvalDecide",
+  // B1-3 会话自建存储（D-09）：列表 / 改名 / 置顶 / 归档 / 删除（进回收站）/ 恢复
+  LIST_SESSIONS: "minipi:listSessions",
+  RENAME_SESSION: "minipi:renameSession",
+  SET_SESSION_PINNED: "minipi:setSessionPinned",
+  SET_SESSION_ARCHIVED: "minipi:setSessionArchived",
+  DELETE_SESSION: "minipi:deleteSession",
+  RESUME_SESSION: "minipi:resumeSession",
 });
 
 /** 推送通道（`webContents.send` ↔ `ipcRenderer.on`）。 */
 export const EVENTS = Object.freeze({
   EVENT: "minipi:event",
   WINDOW_STATE: "minipi:windowState",
+  // 球菜单被主进程收起（失焦 / 形态变化）：渲染层据此清理菜单布局与 aria
+  BALL_MENU_CLOSED: "minipi:ballMenuClosed",
+  /** 球「半隐藏」状态变化 → 渲染层据此改透明度 */
+  BALL_PEEK: "minipi:ballPeek",
   HOTKEY: "minipi:hotkey",
   // v0.4 产出卡片推送（承载 OutcomeCard，见下方 JSDoc）
   OUTCOME: "minipi:outcome",
   // M4 审批闸门（审批设计 §9.1）——主 → 渲染：推 / 就地更新 / 撤回审批卡
   APPROVAL: "minipi:approval",
+  /**
+   * 主进程发起的「打开某个面板」请求（v1.0，托盘菜单用）。
+   * payload: `{ action: "settings" | "about" }`
+   *
+   * 为什么需要它：托盘菜单在**主进程侧**（`src/main/tray.js`），而面板是渲染层画的
+   * （`openSettingsPanel()` / `openAbout()`）。主进程没有办法自己点按钮，所以要一条
+   * 单向推送。刻意做成**通用 UI 动作**而不是 `OPEN_SETTINGS_PANEL` 这种一次性通道：
+   * 以后再加"打开帮助/关于/抽屉"不用再动协议。
+   */
+  UI_ACTION: "minipi:uiAction",
 });
+
+/**
+ * 主题三态（T1）。`system` 交给 OS 决定 —— Electron 的 `nativeTheme.themeSource`
+ * 会直接改变渲染层的 `prefers-color-scheme`，所以 CSS 自动跟随，**无需 IPC、无首帧闪烁**。
+ */
+export const THEME_IDS = Object.freeze(["system", "light", "dark"]);
+/** 主题默认值（结论 D-01：跟随系统）。 */
+export const DEFAULT_THEME = "system";
 
 /** 合并视图，便于调试打印。 */
 export const CHANNELS = Object.freeze({ ...INVOKE, ...EVENTS });
@@ -182,6 +249,17 @@ export const WINDOW_SIZE = Object.freeze({
   full: Object.freeze({ width: 960, height: 680 }),
 });
 
+/**
+ * 悬浮球右键菜单的**视觉盒子**（DIP）。
+ *
+ * 菜单不是第四个形态：它是 ball 态的一次**临时窗口扩张** ——
+ * 主进程把窗口扩成「球 + 菜单 + 留白」的并集，菜单收起后还原 48×48。
+ * 这样右键不再需要先把聊天窗撑出来（那正是用户抱怨的行为）。
+ *
+ * 尺寸与渲染层 `.ballctx` 的 `width:200px` 必须一致；高度按 4 组菜单项 + 底部提示估算。
+ */
+export const BALL_MENU_SIZE = Object.freeze({ width: 200, height: 262 });
+
 /* ========================================================================== *
  * 4. 会话状态
  * ========================================================================== */
@@ -200,6 +278,25 @@ export const STREAMING_BEHAVIOR = Object.freeze({
 });
 
 /* ========================================================================== *
+ * 4b. 会话自建存储（B1-3 / D-09）
+ * ========================================================================== */
+
+/**
+ * 会话 id 形态：`s_<base36 秒时间戳>_<4 位随机字母数字>`。
+ *
+ * 为什么固定这么短：它会出现在**文件名**里（`<ts>_<id>.jsonl`）、在开发者信息里，
+ * 也会穿过 IPC。字符集压到 `[a-z0-9]` 之后，路径拼接与 `SessionManager` 的
+ * `assertValidSessionId()`（`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`）都天然通过。
+ *
+ * 主进程（`main/index.js` 入参校验）与存储层（`session-store.js`）共用这一份，
+ * 避免两边各写一条正则然后慢慢漂移。
+ */
+export const SESSION_ID_PATTERN_SOURCE = "^s_[a-z0-9]+_[a-z0-9]{4}$";
+
+/** 会话默认标题（新会话还没被命名时显示它，也是「可以自动取标题」的判定值）。 */
+export const SESSION_DEFAULT_TITLE = "新会话";
+
+/* ========================================================================== *
  * 5. 场景定义（§3.2）
  * ========================================================================== */
 
@@ -213,61 +310,43 @@ export const STREAMING_BEHAVIOR = Object.freeze({
  *   旧名 → 新名：`speed` → `quick` · `study` → `note` · 新增 `desk` · `work` → `repo`。
  */
 export const SCENE_DEFS = Object.freeze({
-  quick: Object.freeze({
-    sceneId: "quick",
-    label: "quick",
+  chat: Object.freeze({
+    sceneId: "chat",
+    label: "chat",
     cwdTemplate: "~/.minipi/outbox",
-    toolAllowlist: Object.freeze([]),
-    noTools: "all",
-    sessionManagerMode: "memory",
-    description: "随手一问：概念、报错、翻译、改写。无工具可用、不落盘。",
-  }),
-  note: Object.freeze({
-    sceneId: "note",
-    label: "note",
-    cwdTemplate: "~/.minipi/outbox",
-    toolAllowlist: Object.freeze(["read", "write", "grep", "find", "ls"]),
+    // 只给联网工具：能查实时信息，但**仍然碰不到磁盘**（没有 read/write/edit）。
+    toolAllowlist: Object.freeze(["web_search", "web_fetch"]),
     noTools: null,
     sessionManagerMode: "disk",
-    description: "读长文/PDF、写笔记。可写，但只写得进 outbox；无 bash / edit。",
+    description: "只做会话与导出：问答、整理、导出 md/docx；不读写本地文件。",
   }),
-  desk: Object.freeze({
-    sceneId: "desk",
-    label: "desk",
+  work: Object.freeze({
+    sceneId: "work",
+    label: "work",
+    // work 的**真实写入目标**是「当前打开的文档」，由运行时白名单表达（见 sandbox.js）；
+    // cwd 仍落在 outbox，只用于导出与相对路径兜底。
     cwdTemplate: "~/.minipi/outbox",
-    toolAllowlist: Object.freeze(["read", "write", "grep", "find", "ls"]),
+    // ⚠ 无 bash / powershell（D-15）、无 grep / find：
+    //   后两者依赖外部二进制 rg / fd（spike 实测），改单个文档用不上。
+    toolAllowlist: Object.freeze(["read", "write", "edit", "ls", "web_search", "web_fetch"]),
     noTools: null,
     sessionManagerMode: "disk",
-    description: "日常办公产出：纪要、周报、提纲。落盘到 outbox；无 bash / edit。",
-  }),
-  repo: Object.freeze({
-    sceneId: "repo",
-    label: "repo",
-    // repo 是**唯一**允许用户显式选目录的场景（要改真仓库）；
-    // v0.1 契约的 createSession 尚无 cwd 参数 ⇒ 先落到 ~/.minipi/repo 占位，
-    // 待契约扩展后替换（见 README「未完成项」）。
-    cwdTemplate: "~/.minipi/repo",
-    toolAllowlist: Object.freeze([
-      "read", "write", "edit", "grep", "find", "ls", "bash", "powershell",
-    ]),
-    noTools: null,
-    sessionManagerMode: "disk",
-    description: "「这个报错去帮我改代码」。唯一全量工具 + 唯一可改仓库，走审批闸门。",
+    description: "改本地文档：打开/新建 md、docx，写盘逐次审批；无 bash。",
   }),
 });
 
 /** 合法 sceneId 列表。 */
 export const SCENE_IDS = Object.freeze(Object.keys(SCENE_DEFS));
 
-/** 默认场景：quick。 */
-export const DEFAULT_SCENE_ID = "quick";
+/** 默认场景：chat。 */
+export const DEFAULT_SCENE_ID = "chat";
 
 /**
  * 场景 → 产出落点是否在 `outbox` 沙箱内。
- * `repo` 是唯一例外（它要动真仓库）。
+ * `work` 不在其内（它要改用户文档，走审批闸门 + 文档白名单）。
  * 用于渲染层展示「会不会写我的文件」的提示，以及主进程侧的沙箱校验前置判断。
  */
-export const OUTBOX_SCENES = Object.freeze(["quick", "note", "desk"]);
+export const OUTBOX_SCENES = Object.freeze(["chat"]);
 
 /** @returns {boolean} `v` 是否是合法 sceneId */
 export function isSceneId(v) {
@@ -339,30 +418,47 @@ export const OUTCOME_ACTIONS = Object.freeze(["open", "saveAs", "revise"]);
  * ========================================================================== */
 
 /**
- * 需要过审批闸门的工具名单（**只对 `repo` 场景生效**，§8.3）。
+ * 需要过审批闸门的工具名单（**只对 `work` 模式生效**，D-11 / D-15）。
  *
  * ⚠ 与 `src/main/pi/sandbox.js` 的 `WRITE_TOOLS`（`["write","edit"]`）**刻意不同，别合并**：
  *   · 沙箱（规则 1）只管**写路径落在哪**——所以只关心「会写盘」的 `write`/`edit`。
  *   · 审批（规则 2）管「**会改动系统的全部动作**」——除写盘外还包括**跑命令**
  *     （`bash`/`powershell` 能删文件、能推代码，危害不比写盘小）。
  *   两份名单各自成常量、各自有测试，语义不同不要复用同一个数组。
- *   `repo` 白名单里的只读工具（`read`/`grep`/`find`/`ls`）**不进审批**，直接放行。
+ *   `work` 白名单里的只读工具（`read`/`ls`）**不进审批**，直接放行。
+ *
+ * 注：D-15 之后产品内不再有 `bash`/`powershell` 工具，但这两个名字**保留在名单里**——
+ *   审批器是纯函数、不认识场景白名单；万一将来某个场景重新开启命令工具，
+ *   这里不能出现「因为删了名字所以静默放行」的漏洞。
  */
 export const APPROVAL_TOOLS = Object.freeze(["write", "edit", "bash", "powershell"]);
 
 /**
- * 审批卡的三个 outcome（**任务 #3 已拍板**的三按钮语义，v1.1）。
- * `decide` 的 `action` 取值域就是这三个字符串。
+ * 审批卡的四档 outcome（D-11，用户 2026-10-21 拍板）。
+ * `decide` 的 `action` 取值域就是这四个字符串。
  *
- * · `allowOnce`：允许这一次（**本次会话不记住**；「本会话总是允许」是另一开关，默认关）
- * · `deny`：拒绝这一次——`{block:true}` 回灌模型，模型**不重试**
+ * · `allowOnce`：允许这一次，**不记住**
+ * · `allowSession`：本会话**对同一个文件**不再弹卡——**仅内存、退出即失**；
+ *   ⚠ 判据是「**单文件绝对路径全等 + 单槽**」（`approval.js` 的 `_allowFile`：每个会话只存
+ *   一个 `allowKey`，`===` 全等比对），**不是**按工具名、**不是**按路径前缀。
+ *   换个文件即失效；命令类工具（bash/powershell）没有这个按钮。
+ *   （2026-10-23 修正：本条原写「按工具名」，与实现不符，会误导审查者得出错误结论。）
+ *   ⚠ 只免弹卡，**绝不免沙箱**（沙箱在审批之前判，顺序不可反）
+ * · `denyWithInstruction`：拒绝，并把用户填的一句指导**回灌给模型**，让它换路径而不是原地重试
  * · `terminate`：拒绝并**中断整轮**——`{block:true, terminate:true}`
  *
+ * ⚠ 旧值 `deny` 仍然接受（IPC 层做别名映射到 `denyWithInstruction`，无 instruction 时语义等同旧版），
+ *   避免老渲染层/老测试一升级就崩。
  * ⚠ vendor 语义（`types.d.ts:822-826`）：`terminate` 是 **every 语义**——
  *   只有当**同一批的每一个** finalized tool result 都带 `terminate:true` 时才真正生效。
  *   `session.js` 规则 2 据此对整批统一带 `terminate`（§3.6 / §4.2）。
  */
-export const APPROVAL_ACTIONS = Object.freeze(["allowOnce", "deny", "terminate"]);
+export const APPROVAL_ACTIONS = Object.freeze([
+  "allowOnce",
+  "allowSession",
+  "denyWithInstruction",
+  "terminate",
+]);
 
 /** `approvalDecide` 的入参取值域（就是 `APPROVAL_ACTIONS`）。 */
 export const APPROVAL_ACTION_IDS = APPROVAL_ACTIONS;
@@ -453,6 +549,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
   noFocusSteal: false,
   /** 用户偏好的模型，仅影响新建会话；不包含任何密钥 */
   model: null,
+  /** 主题：system / light / dark（D-01 默认跟随系统） */
+  theme: "system",
+  /** 联网总开关（用户 2026-10-20 拍板：**默认开**）。关掉时 web_search/web_fetch 完全不注册。 */
+  webEnabled: true,
+  /** 置顶（用户 2026-10-20：默认**不**置顶；开启后常驻顶部） */
+  alwaysOnTop: false,
   window: Object.freeze({
     /** 上次退出时的形态 */
     state: WINDOW_STATE.BALL,
@@ -489,17 +591,14 @@ export const DEFAULT_MODEL_PREFERENCE = Object.freeze({
  * 其余 30 多个内置厂商（OpenAI、Anthropic、Bedrock…）不默认展示，但可以在
  * 「添加提供方」里找出来。任何**已配置密钥**的厂商不论在不在这个表里都会被展示。
  */
-export const FEATURED_PROVIDER_IDS = Object.freeze([
-  "deepseek",
-  "zai",
-  "zai-coding-cn",
-  "moonshotai-cn",
-  "kimi-coding",
-  "minimax-cn",
-  "qwen-token-plan-cn",
-  "xiaomi",
-  "ant-ling",
-]);
+/**
+ * 默认展示的厂商（模型设置页第一层）。
+ *
+ * 2026-10-20 用户拍板：**先只保留 DeepSeek** —— 模型与联网（搜索/抓取）共用同一个 Key，
+ * 用户配一次就都通。其它厂商没有从代码里删掉，仍可通过「+ 添加提供方」手动展开，
+ * 只是不再默认铺一屏。
+ */
+export const FEATURED_PROVIDER_IDS = Object.freeze(["deepseek"]);
 
 /**
  * 自定义提供方支持的 **API 协议**（逐字取自 Pi 的 `docs/models.md`「Supported APIs」表）。
@@ -605,6 +704,13 @@ export const LIMITS = Object.freeze({
   APPROVAL_WRITE_PREVIEW_CHARS: 2000,
   /** 审计日志里 command 的截断长度（§7.3） */
   APPROVAL_COMMAND_MAX_CHARS: 500,
+  // ---- B1-3 会话自建存储 ----
+  /** 会话标题长度上限（字符）：首条用户消息自动取前 N 字，也是 rename 的截断长度 */
+  SESSION_TITLE_MAX_CHARS: 24,
+  /** 会话预览（最后一条用户消息）长度上限（字符） */
+  SESSION_PREVIEW_MAX_CHARS: 60,
+  /** 一次最多回传的会话条数（防一个坏索引把界面撑爆） */
+  SESSION_LIST_MAX: 200,
 });
 
 /* ========================================================================== *
@@ -792,6 +898,11 @@ export function isWindowState(v) {
 /** `v` 是否是合法 streamingBehavior。 */
 export function isStreamingBehavior(v) {
   return v === STREAMING_BEHAVIOR.STEER || v === STREAMING_BEHAVIOR.FOLLOW_UP;
+}
+
+/** `v` 是否是合法会话 id（`s_<base36 秒>_<4 位>`）。 */
+export function isSessionId(v) {
+  return typeof v === "string" && new RegExp(SESSION_ID_PATTERN_SOURCE).test(v);
 }
 
 /** 是否是安全整数（挡 NaN / Infinity / 浮点）。 */

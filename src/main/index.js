@@ -29,7 +29,7 @@ try {
   /* 极少数只读 env 的场景，忽略 */
 }
 
-import { Menu, app, dialog, ipcMain, shell } from "electron";
+import { Menu, app, dialog, ipcMain, nativeTheme, shell } from "electron";
 
 /*
  * ── 关掉 GPU 进程自己的 sandbox（否则本机 App 起不来） ─────────────────────
@@ -68,20 +68,41 @@ import {
   errorMessage,
   isPlainObject,
   isSceneId,
+  isSessionId,
   isWindowState,
   parseErrorMessage,
 } from "../shared/protocol.js";
 
 import { SettingsStore, ensureAppDirs, MINIPI_HOME } from "./settings.js";
+// `MAIN_LOG_FILE` 只用于崩溃对话框里告诉用户「日志在哪」——路径必须来自 logger.js，
+// 不在这里自己拼（拼出来的路径一旦和 logger 实际写的文件不一致，客户就白找了）。
+import { MAIN_LOG_FILE, createLogger } from "./logger.js";
+import { SessionStore } from "./session-store.js";
 import { WindowManager } from "./window.js";
+import { createTray, disposeTray } from "./tray.js";
 import { grabSelection, registerHotkeys } from "./hotkeys.js";
 import { PiSessionHost, sanitizeDetail } from "./pi/session.js";
 import { ProviderStore } from "./pi/providers-store.js";
+import { getAboutInfo } from "./versions.js";
 import { discoverModels } from "./pi/discover-models.js";
 import { OutcomeService } from "./pi/outcome/index.js";
 import { ApprovalGate } from "./pi/approval.js";
 
-const log = console;
+/*
+ * ── 日志：**必须自己落盘**，不能靠 console ──────────────────────────────────
+ *
+ * 开发期是 `scripts/launch.mjs` 把子进程 stdout/stderr 接进
+ * `~/.minipi/logs/launcher.log`，所以 `const log = console` 够用。
+ *
+ * 打包后这条链路断了：没有启动器，Windows GUI 子系统程序没有控制台，
+ * `console.log` 的输出被系统直接丢弃 ⇒ **客户版永远没有日志**，
+ * 报障时零信息。所以改成自带文件日志（`~/.minipi/logs/main.log`）。
+ * 详见 `src/main/logger.js` 文件头。
+ *
+ * 与启动器日志刻意**分开两个文件**：`launcher.log` 是外壳（node 写），
+ * `main.log` 是应用本体（Electron 写）。客户反馈时两个都要。
+ */
+const log = createLogger();
 const APP_USER_MODEL_ID = "com.minipi.app";
 /** 重放给渲染层的缓冲事件条数上限（重载时不要一次灌太多）。 */
 const REPLAY_MAX_EVENTS = 800;
@@ -118,6 +139,62 @@ if (NO_BOOTSTRAP) {
 }
 
 /* ========================================================================== *
+ * 崩溃兜底：日志 + 一次系统对话框
+ * ========================================================================== */
+
+/**
+ * 是否已经弹过崩溃提示（**只弹一次**，见 `reportFatalCrash` 的第 ② 条）。
+ * 模块级而不是 bootstrap 内：崩溃可能来自任何地方，守卫也只有一个真源。
+ */
+let crashed = false;
+
+/**
+ * 致命崩溃的统一出口：**先落盘，再一次弹窗**。任何一步都不许再抛。
+ *
+ * 为什么要这个函数（发布阻断级缺陷）：
+ *   打包后的 Windows GUI 程序**没有控制台**，`console` 输出被系统丢弃，
+ *   客户版唯一的信息出口是 `~/.minipi/logs/main.log`。但客户根本不知道有这个文件。
+ *   于是主进程一崩，用户看到的就是「悬浮球突然消失了」，既不知道发生了什么、
+ *   也不知道该把什么发给开发者。所以崩溃路径上必须**主动弹一个系统对话框**。
+ *
+ * 三个刻意的取舍（别改回去）：
+ *   ① 用 `dialog.showErrorBox`：**同步**、不需要 BrowserWindow、不依赖 app ready
+ *      （Electron 文档明确写了它「可在 ready 之前安全调用」）。
+ *      崩溃时窗口往往已经没了 / 正在销毁，任何依赖窗口的 API 都不可靠。
+ *   ② **只弹一次**：`uncaughtException` 经常连续触发（同一批 task 里多个回调各自崩），
+ *      弹一屏模态对话框会把桌面锁死，用户连任务管理器都难开。
+ *   ③ **不主动 `app.exit()`**：未捕获异常时 Electron 自己的默认行为就是退出进程。
+ *      我们再调一次只会抢在用户读完文案之前把进程带走，还会跳过收尾/落盘。
+ *      本函数只负责「让用户看到信息 + 知道去哪找日志」，退出交给运行时。
+ *
+ * @param {unknown} err
+ */
+function reportFatalCrash(err) {
+  const detail = sanitizeDetail(err); // 默认截 300 字；且已脱敏（家目录 / 绝对路径 / 密钥）
+  log.error?.(`[minipi] 未捕获异常：${detail}`);
+  if (crashed) return;
+  crashed = true;
+  try {
+    dialog.showErrorBox(
+      "minipi 遇到问题需要关闭",
+      "程序遇到一个未预料到的错误，即将退出。\n\n" +
+        `日志已保存到：${MAIN_LOG_FILE}\n` +
+        "请把该文件发给开发者，能帮助我们定位问题。\n\n" +
+        `（错误摘要：${detail}）`,
+    );
+  } catch (dialogErr) {
+    /* 弹窗本身也在崩溃路径上：`showErrorBox` 自己抛错时**绝不能**再炸一次
+       —— 那会变成「崩溃处理里的崩溃」，用户连一行日志都拿不到。
+       所以整段兜住，最多再记一条日志（连日志都写不进去就彻底放弃）。 */
+    try {
+      log.error?.(`[minipi] 崩溃提示框没能弹出：${sanitizeDetail(dialogErr)}`);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/* ========================================================================== *
  * 启动
  * ========================================================================== */
 
@@ -129,8 +206,21 @@ function bootstrap() {
    * 在 `PiSessionHost` 之前构造：host 初始化 Pi 运行时时会立刻读它并注入。
    */
   const providerStore = new ProviderStore({ logger: log });
+  /**
+   * 会话元数据索引（`~/.minipi/sessions/index.json`，D-09 / B1-3）。
+   * 在 `PiSessionHost` 之前构造：建会话时就要往里登记（`PiSessionHost` 只用这一份实例，
+   * 不再自己造第二个 —— 两个 store 各自缓存条目会互相覆盖）。
+   */
+  const sessionStore = new SessionStore({ logger: log });
   /** @type {WindowManager | null} */
   let wm = null;
+  /**
+   * 系统托盘（`src/main/tray.js`）。
+   * 放在 bootstrap 闭包里而不是局部变量：`will-quit` 要向它收尾，
+   * 另外 Tray 实例本身那个强引用在 tray.js 的模块级变量上（防 GC 掉图标）。
+   * @type {{ tray: import("electron").Tray | null, destroy: () => void } | null}
+   */
+  let trayRef = null;
 
   /**
    * M4 审批闸门（`repo` 场景护栏）。
@@ -156,9 +246,13 @@ function bootstrap() {
     logger: log,
     approval: approvalGate,
     modelPreference: () => settings.get().model,
+    /** 联网总开关（默认开）。关掉时连工具都不注册 —— 模型看不到，就不会"假装搜过"。 */
+    webEnabled: () => settings.get().webEnabled !== false,
     // minipi 自己的提供方定义（自定义 / 覆盖内置）。**不写 Pi 的 models.json**，
     // 通过 ModelRuntime.registerProvider() 注入运行时 —— 理由见 providers-store.js 文件头。
     providerStore,
+    // 会话元数据索引（D-09）：与下面 IPC 侧用的是同一份实例
+    sessionStore,
   });
   /**
    * 产出链路服务（M5）。
@@ -218,6 +312,15 @@ function bootstrap() {
       /* ignore */
     }
     try {
+      // 托盘先拆：它只是窗口/菜单的入口，窗口没了再留图标只会点出错误。
+      // 用 `disposeTray()` 而不是 `trayRef.destroy()`：真正的强引用在 tray.js 的
+      // 模块级变量上（防 GC 掉图标），走模块自己的出口才不会漏掉那种情况。
+      disposeTray(log);
+      trayRef = null;
+    } catch {
+      /* ignore */
+    }
+    try {
       pi.disposeAll();
     } catch {
       /* ignore */
@@ -230,10 +333,16 @@ function bootstrap() {
   });
 
   process.on("unhandledRejection", (reason) => {
+    /* 只记日志、**不弹窗**（刻意的取舍）：
+       Promise 拒绝绝大多数是可恢复的（一次请求失败、一次 aborted fetch、一次超时），
+       用户完全可能接着正常用。为它弹系统对话框 = 把偶发抖动升级成骚扰，
+       客户很快会学会「见到 minipi 的弹窗就关掉」—— 那样真崩溃时的提示也会被无视。
+       需要人知道的致命错误走下面的 uncaughtException（它会弹框）。 */
     log.error?.(`[minipi] 未处理的 Promise 拒绝：${sanitizeDetail(reason)}`);
   });
   process.on("uncaughtException", (err) => {
-    log.error?.(`[minipi] 未捕获异常：${sanitizeDetail(err)}`);
+    // 日志 + 一次性系统对话框（为什么不退出、为什么只弹一次，见 reportFatalCrash 的注释）
+    reportFatalCrash(err);
   });
 
   app.whenReady().then(async () => {
@@ -250,6 +359,11 @@ function bootstrap() {
 
     ensureAppDirs();
     const loaded = settings.load();
+    /* 主题必须在**创建窗口之前**落到 nativeTheme：
+       themeSource 会直接改变渲染层的 prefers-color-scheme，于是 CSS 首帧就是对的，
+       不需要等异步 IPC、也不会「先白后黑」。这是 T1 无闪烁的全部秘密。 */
+    nativeTheme.themeSource = loaded.theme;
+    log.info?.(`[minipi] 主题 = ${loaded.theme}（system 时跟随 OS）`);
     for (const w of settings.warnings) log.warn?.(`[minipi] ${w}`);
     // 提供方定义必须在 pi.init() 之前加载完 —— init 里会立刻把它注入 ModelRuntime
     providerStore.load();
@@ -279,6 +393,30 @@ function bootstrap() {
       log.error?.(`[minipi] 窗口创建失败，App 退出：${sanitizeDetail(err)}`);
       app.exit(1);
       return;
+    }
+
+    /* ③' 系统托盘 —— **必须在窗口建好之后**：托盘菜单项要调 `wm.setState() / raise()`，
+       窗口不存在时点下去只会报错；而它又是"窗口被盖住时唯一的入口"，
+       所以放在 create() 成功之后、其余初始化之前，让用户最早就有一个可靠入口。
+       创建失败只记为「无托盘」并继续启动（没有托盘的 App 仍然能用，
+       为了让托盘出现而拒绝启动是本末倒置）。 */
+    try {
+      trayRef = createTray({
+        logger: log,
+        actions: {
+          // 与 Alt+Space 完全同一条路径（复用 handleToggle，别在这里另写一套 toggle 逻辑）
+          toggle: () => handleToggle(wm),
+          mini: () => wm.setState("mini"),
+          settings: () => openPanelFromTray(wm, "settings"),
+          about: () => openPanelFromTray(wm, "about"),
+          quit: () => {
+            log.info?.("[minipi:tray] 托盘菜单：退出");
+            app.quit();
+          },
+        },
+      });
+    } catch (err) {
+      log.warn?.(`[minipi] 托盘创建失败（不阻断启动）：${sanitizeDetail(err)}`);
     }
 
     // ③ 预热 Pi（复用 ~/.pi/agent/auth.json）——不阻塞窗口显示
@@ -332,6 +470,36 @@ async function handleGrabSelection(wm, pushHotkey) {
     await wm.raise();
   }
   pushHotkey({ action: "grabSelection", selection: result.selection, ok: result.ok });
+}
+
+/**
+ * 托盘的「模型设置 / 关于」：先把窗口叫到前台，**再**请渲染层打开面板。
+ *
+ * 顺序与两个细节（都是必须的）：
+ *   ① 球态窗口只有 48×48，面板画不出来（渲染层 `renderMode()` 在 ball 态会主动把
+ *      `#settingsPanel` / `#aboutPanel` 收起来）⇒ 先 `setState("mini")`。
+ *      这条与渲染层球右键菜单里"模型设置"走的是**同一条路**（也是先展开小窗）。
+ *   ② 窗口可能被用户 `hideBall()` 藏起来了：`setState` / `raise` 都会顺手显示它，
+ *      所以不需要额外 show。
+ *   ③ 面板由渲染层画（`openSettingsPanel()` / `openAbout()`），主进程没有按钮可点，
+ *      只能推 `EVENTS.UI_ACTION`。**不要**为了这个再新增一条专用 IPC 通道。
+ *
+ * @param {WindowManager} wm
+ * @param {"settings" | "about"} action
+ */
+async function openPanelFromTray(wm, action) {
+  try {
+    if (wm.state === "ball") {
+      await wm.setState("mini");
+    } else {
+      await wm.raise();
+    }
+  } catch (err) {
+    // 抬窗失败也继续推事件：窗口也许只是被遮挡，面板开出来用户还能看到
+    log.warn?.(`[minipi:tray] 打开「${action}」前抬窗失败：${sanitizeDetail(err)}`);
+  }
+  const sent = wm.sendToRenderer(EVENTS.UI_ACTION, { action });
+  if (!sent) log.warn?.(`[minipi:tray] 推送 UI_ACTION(${action}) 失败（渲染层不可用？）`);
 }
 
 /* ========================================================================== *
@@ -441,6 +609,124 @@ export function registerIpc({ settings, wm, pi, outcome, approval, log = console
 
   handle(INVOKE.ABORT, (arg) => pi.abort(arg));
 
+  /* ---------------- 会话自建存储（B1-3 / D-09） ----------------
+   *
+   * 六个通道：列表 / 改名 / 置顶 / 归档 / 删除（进回收站）/ 恢复。
+   * 共同口径：
+   *   · `id` 一律过 `isSessionId()`（形如 `s_<base36 秒>_<4 位>`）。
+   *     非法 → `INVALID_ARGUMENT`（**不要**落到「找不到」：两者对排查的意义完全不同）；
+   *   · 索引 / 文件里没有 → 存储层返回 null 或抛 `SESSION_NOT_FOUND`，这里统一转成错误码；
+   *   · 参数类型挡在边界（渲染层不可信），长度由存储层归一（标题截 24 字）。
+   */
+
+  /** 取会话索引（`PiSessionHost` 持有的那一份实例，见 bootstrap）。 */
+  const sessionStore = () => pi.sessionStore;
+
+  /** @param {unknown} raw */
+  const requireSessionId = (raw) => {
+    if (!isSessionId(raw)) {
+      throw new Error(
+        errorMessage(ERROR_CODES.INVALID_ARGUMENT, "id 必须是会话 id（形如 s_<时间戳>_<4 位>）"),
+      );
+    }
+    return raw;
+  };
+
+  /** @param {string} id */
+  const sessionNotFound = (id) =>
+    new Error(errorMessage(ERROR_CODES.SESSION_NOT_FOUND, `会话不存在或已删除：${id}`));
+
+  handle(INVOKE.LIST_SESSIONS, (arg) => {
+    if (arg.query !== undefined && arg.query !== null && typeof arg.query !== "string") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "query 必须是字符串"));
+    }
+    if (arg.archived !== undefined && arg.archived !== null && typeof arg.archived !== "boolean") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "archived 必须是 boolean"));
+    }
+    return sessionStore().list({ query: arg.query ?? "", archived: arg.archived === true });
+  });
+
+  handle(INVOKE.RENAME_SESSION, (arg) => {
+    const id = requireSessionId(arg.id);
+    if (typeof arg.title !== "string") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "title 必须是字符串"));
+    }
+    const item = sessionStore().rename(id, arg.title);
+    if (!item) throw sessionNotFound(id);
+    return { ok: true, item };
+  });
+
+  handle(INVOKE.SET_SESSION_PINNED, (arg) => {
+    const id = requireSessionId(arg.id);
+    if (typeof arg.pinned !== "boolean") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "pinned 必须是 boolean"));
+    }
+    const item = sessionStore().setPinned(id, arg.pinned);
+    if (!item) throw sessionNotFound(id);
+    return { ok: true, item };
+  });
+
+  handle(INVOKE.SET_SESSION_ARCHIVED, (arg) => {
+    const id = requireSessionId(arg.id);
+    if (typeof arg.archived !== "boolean") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "archived 必须是 boolean"));
+    }
+    const item = sessionStore().setArchived(id, arg.archived);
+    if (!item) throw sessionNotFound(id);
+    return { ok: true, item };
+  });
+
+  handle(INVOKE.DELETE_SESSION, async (arg) => {
+    const id = requireSessionId(arg.id);
+    /* ---- BLK-1：删活会话会把正文写坏 ----
+     *
+     * 现象：`SessionManager._persist` 在首次落盘后走 `appendFileSync(this.sessionFile)`
+     * （`session-manager.js:812`）——**文件不在就用 append 模式重建一个**。
+     * 所以「会话还活着 → 删 → 再发一句话」会让原路径冒出一份**没有 session header** 的
+     * 同名 jsonl。**这个现象依然存在**（SDK 行为，我们改不了）；
+     * 但**后果已被存储层拦住**：重启后 `_idOfFile` 会校验首行 header，**不认领**这种
+     * 无 header 残片 ⇒ 已删会话**不会**复活（`session-store.js` 的 `_idOfFile`）。
+     * （2026-10-23 修正：本段原写「按文件名认领（不看 header）⇒ 已删会话原地复活」，
+     *   那是修复前的行为，已过时。残片文件本身仍留在磁盘，属 P2 物理清理，v1 不做。）
+     *
+     * ⚠ 顺序是有讲究的，别调：
+     *   ① **先判流式**（用我们自己的 rec.status，不依赖 SDK）：`AgentSession.dispose()`
+     *      只触发 abort，**abort 之后仍可能有一次收尾 append**（`agent-session.js:996-1003`，
+     *      整段 try/catch 还会吞掉错误）。若先 dispose 再 remove，那一次 append 照样能把
+     *      文件重建出来 ⇒ 拒绝删除形同虚设。所以流式中**直接拒绝，不 dispose、不 remove**。
+     *   ② 活着但**空闲** → 先 dispose 摘掉写入者（注意语义：不是"活着一律不许删"，
+     *      刚建的空会话本来就活着且没有文件，用户删它是正常操作）；
+     *   ③ 最后才移文件。
+     */
+    const isStreaming = () => pi.isStreaming(id);
+    if (isStreaming()) {
+      throw new Error(errorMessage(ERROR_CODES.SESSION_BUSY, "正在生成回答，先中断再删除"));
+    }
+    if (pi.hasSession(id)) {
+      // 摘掉写入者；返回值 false 说明已经不在记录里（幂等）
+      pi.disposeSession(id);
+    }
+    let removed;
+    try {
+      // 正文移进 `.trash/`（可恢复），**不做物理删除**（plan §2.2：v1 不删真数据）。
+      // `isStreaming` 钩子是存储层的最后一道保险（dispose 万一没成功，宁可拒绝删除）。
+      removed = await sessionStore().remove(id, { isStreaming });
+    } catch (err) {
+      if (err && err.code === "SESSION_NOT_FOUND") throw sessionNotFound(id);
+      if (err && err.code === "SESSION_BUSY") {
+        throw new Error(errorMessage(ERROR_CODES.SESSION_BUSY, "正在生成回答，先中断再删除"));
+      }
+      throw err;
+    }
+    log.info?.(`[minipi:ipc] 会话已移入回收站 ${id}`);
+    /* 把存储层的 `trashedTo` 原样带回渲染层（preload 的 JSDoc 早就这么写了）。
+       `null` 是合法值 —— 会话**还没有正文文件**（刚建、没说过话）时没有东西可搬，
+       渲染层据此不说路径（详见 `src/renderer/index.html` 里那段删除 toast 的注释）。 */
+    return { ok: true, trashedTo: removed?.trashedTo ?? null };
+  });
+
+  handle(INVOKE.RESUME_SESSION, (arg) => pi.resumeSession({ id: requireSessionId(arg.id) }));
+
   /* ---------------- 产出链路（M5） ---------------- */
 
   // 入参校验由 OutcomeService.generate 内部完成（sessionId / intent / format），
@@ -463,6 +749,78 @@ export function registerIpc({ settings, wm, pi, outcome, approval, log = console
   handle(INVOKE.LIST_OUTCOMES, (arg) => {
     if (!outcome) throw new Error(errorMessage(ERROR_CODES.INTERNAL, "产出服务未初始化"));
     return outcome.list(arg);
+  });
+
+  /* ---------------- 产出抽屉（D-14：持久索引） ---------------- */
+  handle(INVOKE.LIST_ASSETS, (arg) => {
+    if (!outcome) throw new Error(errorMessage(ERROR_CODES.INTERNAL, "产出服务未初始化"));
+    return outcome.indexList(arg);
+  });
+
+  handle(INVOKE.OPEN_ASSET, async (arg) => {
+    if (!outcome) throw new Error(errorMessage(ERROR_CODES.INTERNAL, "产出服务未初始化"));
+    const { absPath } = outcome.indexAbsPath(arg);
+    const errMsg = await shell.openPath(absPath);
+    if (errMsg) throw new Error(errorMessage(ERROR_CODES.OUTCOME_NOT_FOUND, `打开失败：${errMsg}`));
+    return { ok: true };
+  });
+
+  handle(INVOKE.REMOVE_ASSET, (arg) => {
+    if (!outcome) throw new Error(errorMessage(ERROR_CODES.INTERNAL, "产出服务未初始化"));
+    return outcome.indexRemove(arg);
+  });
+
+  handle(INVOKE.REVEAL_ASSET, (arg) => {
+    if (!outcome) throw new Error(errorMessage(ERROR_CODES.INTERNAL, "产出服务未初始化"));
+    const { absPath } = outcome.indexAbsPath(arg);
+    shell.showItemInFolder(absPath);
+    return { ok: true };
+  });
+
+  /* ---------------- 模型就绪状态（首启引导，P1） ----------------
+   *
+   * 客户装完第一次打开，大概率一个 Key 都没配过。改动前产品在这种情况下
+   * 只是「问了一句没反应」或者抛一条 `PI_UNAVAILABLE` —— 客户不知道要先去设置里配。
+   * 渲染层靠这个**只读**接口决定要不要在聊天区放一张「去配置」引导卡。
+   *
+   * ⚠ 两条硬约束：
+   *   · **永不 reject**：它报告的状态本身就包含「读不出来」。抛错会让引导卡变成
+   *     一块「读取失败」，等于把兜底做成了第二个故障点 —— 所以整段 try/catch，
+   *     连 `pi` 没初始化好也当「未就绪」返回。
+   *   · **绝不带 key**（D-03）：只回 `{ ready, reason }`，reason 是给用户看的中文短句。
+   *
+   * 判定口径（以 `pi/session.js` 的 `listProviders()` 真实字段为准，别凭空假设）：
+   *   每项有 `configured`（该提供方凭据是否已配置，来自 `getProviderAuthStatus`）
+   *   与 `models[]`（该提供方的模型目录，来自 `getModels`）。
+   *   「有可用模型且已选中」 ⇔ 至少一个 **configured 且 models 非空** 的提供方：
+   *   满足时 Pi 建会话必然解析得出模型 —— `createSession` 会先 `resolvePreferredModel()`
+   *   （失败还会兜 `DEFAULT_MODEL_PREFERENCE`），`createAgentSession` 内部再
+   *   `findInitialModel()` 兜一层（`sdk.js`）。
+   *   刻意**不**再比对 `settings.model` 是否存在：默认偏好指向的模型可能被厂商下架，
+   *   而用户另一个提供方明明配好了 —— 那会把「能用」误报成「不能用」，
+   *   把客户推回设置页去改一个本来没问题的选择。
+   */
+  handle(INVOKE.MODEL_STATUS, async () => {
+    try {
+      await pi.init();
+      const providers = await pi.listProviders();
+      const list = Array.isArray(providers) ? providers : [];
+      const configured = list.filter((p) => p && p.configured === true);
+      const usable = configured.filter((p) => Array.isArray(p.models) && p.models.length > 0);
+      if (usable.length > 0) return { ready: true, reason: "" };
+      const reason =
+        configured.length === 0
+          ? "还没有配置模型，所以暂时不能对话。点「去配置」填一个 API Key 就能开始用。"
+          : "密钥已保存，但没读到可用的模型。点「去配置」检查一下 API 地址或模型目录。";
+      log.info?.(`[minipi:ipc] 模型未就绪 · 已配置提供方 ${configured.length} 个 · 可用 ${usable.length} 个`);
+      return { ready: false, reason };
+    } catch (err) {
+      /* 初始化失败（依赖没装好 / 凭据文件损坏 / 磁盘问题）也按「未就绪」返回：
+         给用户一句可执行的下一步，细节进日志。**不要**把 sanitizeDetail 后的技术细节
+         塞进 reason —— 客户看不懂，还可能带出内部路径。 */
+      log.warn?.(`[minipi:ipc] 读取模型状态失败（按未就绪处理）：${sanitizeDetail(err)}`);
+      return { ready: false, reason: "暂时读不到模型配置。点「去配置」检查一下，详情见日志。" };
+    }
   });
 
   /* ---------------- 模型配置 ---------------- */
@@ -543,7 +901,17 @@ export function registerIpc({ settings, wm, pi, outcome, approval, log = console
   // `remember:true`（仅 allowOnce 有意义）⇒ 本会话总是允许该工具（R5，内存级、默认关）。
   handle(INVOKE.APPROVAL_DECIDE, (arg) => {
     if (!approval) throw new Error(errorMessage(ERROR_CODES.INTERNAL, "审批服务未初始化"));
-    return approval.decide({ approvalId: arg.approvalId, action: arg.action, remember: arg.remember });
+    // instruction：四档里「拒绝并说明」的用户输入。类型在边界就挡掉，
+    // 长度由 approval.normalizeDenyInstruction() 统一截断（渲染层不可信）。
+    if (arg?.instruction !== undefined && typeof arg.instruction !== "string") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "instruction 必须是字符串"));
+    }
+    return approval.decide({
+      approvalId: arg.approvalId,
+      action: arg.action,
+      remember: arg.remember,
+      instruction: arg.instruction,
+    });
   });
 
   /* ---------------- 窗口 ---------------- */
@@ -555,9 +923,66 @@ export function registerIpc({ settings, wm, pi, outcome, approval, log = console
     return wm.setState(arg.state);
   });
 
+  // 置顶开关（用户 2026-10-20：默认不置顶，开启后常驻顶部）
+  handle(INVOKE.SET_ALWAYS_ON_TOP, (arg) => {
+    if (!arg || typeof arg.on !== "boolean") {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "on 必须是 boolean"));
+    }
+    const next = settings.set({ alwaysOnTop: arg.on });
+    const applied = wm.applyAlwaysOnTop();
+    log.info?.(`[minipi:ipc] 置顶 = ${applied}`);
+    return { ok: true, on: applied, alwaysOnTop: next.alwaysOnTop };
+  });
+
+  // 最小化到任务栏（mini / full）
+  handle(INVOKE.MINIMIZE_WINDOW, () => {
+    log.info?.("[minipi:ipc] 最小化窗口");
+    return wm.minimize();
+  });
+
+  /* ---- 悬浮球右键菜单（v1.1）：菜单画在渲染层，主进程只负责临时窗口几何 ---- */
+
+  handle(INVOKE.SHOW_BALL_MENU, async () => {
+    const layout = await wm.openBallMenu();
+    if (!layout) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "当前不是悬浮球形态，无法打开球菜单"));
+    }
+    return { ok: true, layout };
+  });
+
+  handle(INVOKE.HIDE_BALL_MENU, async () => ({ ok: await wm.closeBallMenu() }));
+
+  // 关闭悬浮窗 = 隐藏窗口（不退出 App）。唤回：Alt+Space / 再次启动。
+  handle(INVOKE.HIDE_BALL, async () => ({ ok: wm.hideBall() }));
+
+  // 球态手动拖拽：渲染层传屏幕位移，主进程夹进工作区后 setPosition
+  /* 拖球三步。渲染层**不传坐标** —— 它传过来的 screenX/movementX 都会被窗口移动污染
+     （见 `window.js` 里 beginBallDrag 的注释），坐标统一由主进程读 OS 游标。 */
+  handle(INVOKE.BALL_DRAG_BEGIN, () => wm.beginBallDrag());
+  handle(INVOKE.BALL_DRAG_MOVE, (arg) => wm.moveBallToCursor(Number(arg?.threshold ?? 4)));
+  handle(INVOKE.BALL_DRAG_END, () => wm.endBallDrag());
+
+  /* 半隐藏（类 360 悬浮球）：吸边后 3 秒无操作 → 一半滑出屏幕；移入滑出、移出立刻收回。 */
+  handle(INVOKE.BALL_PEEK_IN, () => ({ ok: wm.ballPeekIn() }));
+  handle(INVOKE.BALL_PEEK_OUT, () => ({ ok: wm.ballPeekOut() }));
+  handle(INVOKE.BALL_PIN, () => ({ ok: wm.ballPin() }));
+
+  // 拖拽结束吸边：只改窗口位置，不写设置（球位置本来就是内存里的临时状态）
+  handle(INVOKE.SNAP_BALL, () => ({ ok: wm.snapBall() }));
+
   /* ---------------- 设置 ---------------- */
 
   handle(INVOKE.GET_SETTINGS, () => settings.get());
+
+  /* 「关于」：版本一律**运行时探测**（读已安装包的 package.json），不写死文案 ——
+     否则升级依赖后界面就开始说谎。 */
+  handle(INVOKE.GET_ABOUT, () =>
+    getAboutInfo({
+      electron: process.versions.electron ?? null,
+      chrome: process.versions.chrome ?? null,
+      node: process.versions.node ?? null,
+    }),
+  );
 
   handle(INVOKE.SET_SETTINGS, (arg) => {
     if (Object.keys(arg).length === 0) return settings.get();
@@ -566,6 +991,10 @@ export function registerIpc({ settings, wm, pi, outcome, approval, log = console
     }
     try {
       const next = settings.set(arg);
+      // 主题是**即时生效**的：改完立刻落到 nativeTheme（渲染层靠媒体查询自动跟随）
+      if (arg.theme !== undefined && arg.theme !== nativeTheme.themeSource) {
+        nativeTheme.themeSource = next.theme;
+      }
       log.info?.(`[minipi:ipc] 设置已更新：${Object.keys(arg).join(", ")}`);
       return next;
     } catch (err) {

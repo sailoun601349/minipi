@@ -51,6 +51,7 @@ import { buildFileName, normalizeOutcome, validateOutcome } from "./schema.js";
 import { buildOutcomePrompt, buildRetryPrompt, parseOutcomeJson } from "./prompt.js";
 import { renderMarkdown } from "./render-md.js";
 import { renderDocx } from "./render-docx.js";
+import { OutcomeStore } from "./store.js";
 
 /** 素材文本的长度上限 —— 防止把整段超长对话灌进提示词把模型打爆。 */
 const SOURCE_TEXT_MAX_CHARS = 8000;
@@ -87,6 +88,8 @@ export class OutcomeService {
     /** @type {Map<string, {absPath: string|null, format: string, inlineText: string|null, meta: object}>} */
     this._outcomes = new Map();
     this._counter = 0;
+    /** 产出索引（D-14）：跨重启可见、与 outbox 对账。测试可注入。 */
+    this._store = deps.outcomeStore ?? new OutcomeStore({ outboxDir: this._outboxDir, logger: this._logger });
   }
 
   /* ==================================================================== *
@@ -135,21 +138,25 @@ export class OutcomeService {
     }
 
     // ---- 2. 取素材 ----
-    // 简化说明：`session.js` 目前**没有**「导出近期会话文本」的现成方法。
-    // 方案 §3.1.1 也提醒「不要为了取素材去大改 session.js」⇒ 这里把素材简化成
-    // 只有 `intent` 本身（模型会依据 intent + 自己的上下文来组织）。若将来
-    // session.js 提供 `recentTranscript()`，把它接在下面这个常量处即可。
+    // 导出走的是 `completeSimple` **一次性调用**，模型看不到会话上下文 ⇒ 素材必须显式给。
+    // 由 `piHost.recentTranscript()` 摘出最近对话（它自己负责截断与「只要用户/助手说话内容」）；
+    // 取不到就按无素材继续 —— 降级①会把模型原文兜底成 md，绝不因此让导出失败。
     const sourceText = this._collectSourceText(sessionId);
 
     // ---- 3. 调一次模型出 JSON ----
     let text = await this._callStructured(sessionId, buildOutcomePrompt({ intent, sourceText, format: rawFormat }));
 
     // ---- 4. 解析 + 校验；失败则用修正提示词再试一次（降级条件①的第一次修正）----
+    // ⚠ 修正重试必须带上「首次请求的完整入参」：一次性调用没有会话上下文，
+    //   模型既不知道用户那句意图，也看不到素材（`buildRetryPrompt` 会据此重贴完整的产出要求）。
+    //   同时把**上一次的输出**带上，让它能在原稿上改而不是凭空重写。
+    //   `text` 在下面被重新赋值，此时还是上一轮的原文。
+    const retryContext = { intent, sourceText, format: rawFormat };
     let doc = null;
     const parsed = parseOutcomeJson(text);
     if (!parsed.ok) {
       this._logger.warn?.(`[minipi:outcome] 首次 JSON 解析失败，发起修正重试`);
-      text = await this._callStructured(sessionId, buildRetryPrompt(parsed.errors));
+      text = await this._callStructured(sessionId, buildRetryPrompt(parsed.errors, text, retryContext));
       doc = this._extractDoc(text);
     } else {
       doc = this._extractDoc(text);
@@ -157,7 +164,7 @@ export class OutcomeService {
         // schema 校验失败 → 修正重试一次
         const firstErrors = this._lastValidateErrors;
         this._logger.warn?.(`[minipi:outcome] 首次 schema 校验失败，发起修正重试`);
-        text = await this._callStructured(sessionId, buildRetryPrompt(firstErrors));
+        text = await this._callStructured(sessionId, buildRetryPrompt(firstErrors, text, retryContext));
         doc = this._extractDoc(text);
       }
     }
@@ -248,6 +255,21 @@ export class OutcomeService {
       meta: card,
     });
 
+    // ---- 10.5 登记产出索引（D-14）：只有真落盘才登记，降级产物没有文件可管 ----
+    if (absPath) {
+      try {
+        this._store.upsert({
+          fileName: card.fileName,
+          title: card.title,
+          bytes: card.bytes,
+          createdAt: card.createdAt,
+        });
+      } catch (err) {
+        // 索引写失败不影响本次导出（文件已经落盘了）
+        this._logger.warn?.(`[minipi:outcome] 索引登记失败：${this._safeErr(err)}`);
+      }
+    }
+
     // ---- 11. 推卡片 ----
     try {
       this._emitOutcome(card);
@@ -336,6 +358,43 @@ export class OutcomeService {
     return { items };
   }
 
+  /**
+   * 抽屉页用：读**持久索引**（跨重启可见），按关键词过滤。
+   * 与 `list()` 的区别：list 是本次进程内的内存表（供卡片回查），这里是磁盘上的资产。
+   * @param {{ query?: string, limit?: number }} [input]
+   */
+  indexList(input = {}) {
+    return this._store.list({ query: input?.query, limit: input?.limit });
+  }
+
+  /**
+   * 抽屉页用：删除一条产出 —— **文件进回收站**（可恢复），索引同步移除。
+   * @param {{ id: string }} input
+   */
+  async indexRemove(input = {}) {
+    const id = String(input?.id ?? "");
+    if (id.length === 0) {
+      throw new Error(errorMessage(ERROR_CODES.INVALID_ARGUMENT, "id 不能为空"));
+    }
+    try {
+      return await this._store.remove(id);
+    } catch (err) {
+      if (err?.code === "OUTCOME_NOT_FOUND") {
+        throw new Error(errorMessage(ERROR_CODES.OUTCOME_NOT_FOUND, "产出不存在或已删除"));
+      }
+      throw new Error(errorMessage(ERROR_CODES.OUTCOME_WRITE_FAILED, `删除失败：${this._safeErr(err)}`));
+    }
+  }
+
+  /** 抽屉页用：取绝对路径（供「在文件夹中显示」）。越界一律按不存在处理。 */
+  indexAbsPath(input = {}) {
+    const absPath = this._store.absPathOf(input?.id);
+    if (!absPath) {
+      throw new Error(errorMessage(ERROR_CODES.OUTCOME_NOT_FOUND, "产出不存在"));
+    }
+    return { absPath };
+  }
+
   /** 供测试/内部使用：暴露内存表条目（只读拷贝）。 */
   getOutcomeEntry(outcomeId) {
     return this._outcomes.get(outcomeId) ?? null;
@@ -346,16 +405,29 @@ export class OutcomeService {
    * ==================================================================== */
 
   /**
-   * 从 Pi 会话取素材文本。
+   * 从 Pi 会话取素材文本（近期对话的纯文本摘要）。
    *
-   * 当前实现：**简化**为只返回空串（模型依据 intent 与自身上下文组织）。
-   * 原因见 `generate()` 第 2 步的注释。保留成方法是为了将来接 session.js
-   * 的 `recentTranscript()` 时只改这一处。
-   * @param {string} _sessionId
+   * 为什么需要它：导出走 `completeSimple` 一次性调用，**没有会话隐式上下文**，
+   * 素材只能显式给。真正的摘取逻辑（过滤角色、只取 text 块、从末尾截断）在
+   * `session.js:recentTranscript()`，这里只负责调用 + 兜底。
+   *
+   * ⚠ 两处兜底都不是可选的：
+   *   · 宿主没有 `recentTranscript`（旧版宿主 / 测试里的假宿主）⇒ 返回空串；
+   *   · 调用抛错 ⇒ 记一条 warn 后返回空串。
+   *   取素材失败**不该让导出失败**：没素材也能出稿，只是质量差一点。
+   *
+   * @param {string} sessionId
    * @returns {string}
    */
-  _collectSourceText(_sessionId) {
-    return "";
+  _collectSourceText(sessionId) {
+    const fn = this._piHost?.recentTranscript;
+    if (typeof fn !== "function") return "";
+    try {
+      return String(fn.call(this._piHost, sessionId, SOURCE_TEXT_MAX_CHARS) ?? "");
+    } catch (err) {
+      this._logger.warn?.(`[minipi:outcome] 取会话素材失败，按无素材继续：${this._safeErr(err)}`);
+      return "";
+    }
   }
 
   /**

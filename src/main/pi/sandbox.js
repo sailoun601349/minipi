@@ -92,19 +92,23 @@ export const WRITE_PATH_FIELDS = Object.freeze(["path"]);
  *
  * ⚠ **未知 sceneId 一律拒绝**（见 `sceneDisposition()`），不做「不在名单就放行」。
  */
-const OUTBOX_SCENE_IDS = Object.freeze(["quick", "note", "desk"]);
+const OUTBOX_SCENE_IDS = Object.freeze(["chat"]);
 
 /**
  * **已知的、刻意不受沙箱约束**的场景 —— 走审批闸门，沙箱放行。
  *
- * `repo` 是唯一一个：它要动真仓库（`toolAllowlist` 含 `bash`/`edit`），
- * 沙箱对它物理上无效（bash 能 `cd /`），防线是审批（方案 §2.4）。
+ * `work` 是唯一一个：它要改**用户自己的文档**（在 outbox 之外），沙箱对它物理上无效，
+ * 防线是四档审批（D-11）。
+ *
+ * ⚠ 与 v0.4 的区别：`repo` 已砍掉（D-15），豁免资格由 `work` 继承。
+ *   B1 阶段 `work` 的写盘范围**暂不限定具体文件**（靠审批兜住）；
+ *   B3 会在此之上加「当前打开的文档」白名单（`workDocPath` + 备份后缀），届时这里要同步收紧。
  *
  * ⚠ **只有显式列在这里的场景才放行**。其他任何 sceneId（含拼错、含将来新增的）
  * 都当作「未知」→ **拒绝**（fail-closed）。这样 `protocol.js` 新增 outbox 场景
  * 而忘记同步本文件时，表现为**误杀**（用户可感知、可上报），而不是**静默漏放**（无人知晓）。
  */
-const SANDBOX_EXEMPT_SCENE_IDS = Object.freeze(["repo"]);
+const SANDBOX_EXEMPT_SCENE_IDS = Object.freeze(["work"]);
 
 /**
  * SDK 会把这些「Unicode 空格类字符」归一成半角空格。

@@ -30,8 +30,7 @@ export function expandHome(p) {
 
 /** 场景的 cwd 相对映射：命中 `~/.minipi/*` 时直接用预建目录，避免路径漂移。 */
 const TEMPLATE_TO_DIR = Object.freeze({
-  "~/.minipi/outbox": SCENE_CWD_DIRS.quick,
-  "~/.minipi/repo": SCENE_CWD_DIRS.repo,
+  "~/.minipi/outbox": SCENE_CWD_DIRS.chat,
 });
 
 /**

@@ -106,14 +106,69 @@ const minipi = Object.freeze({
   /** @param {{ sessionId: string }} arg → { ok } */
   abort: (arg) => call(INVOKE.ABORT, arg),
 
+  /* -------- 会话自建存储（B1-3 / D-09） -------- */
+
+  /** @param {{ query?: string, archived?: boolean }} [arg] → { items: SessionMeta[] } */
+  listSessions: (arg) => call(INVOKE.LIST_SESSIONS, arg),
+  /** @param {{ id: string, title: string }} arg → { ok: true, item }（标题截 24 字，空则回「新会话」） */
+  renameSession: (arg) => call(INVOKE.RENAME_SESSION, arg),
+  /** @param {{ id: string, pinned: boolean }} arg → { ok: true, item } */
+  setSessionPinned: (arg) => call(INVOKE.SET_SESSION_PINNED, arg),
+  /** @param {{ id: string, archived: boolean }} arg → { ok: true, item }（归档不动文件、不删数据） */
+  setSessionArchived: (arg) => call(INVOKE.SET_SESSION_ARCHIVED, arg),
+  /**
+   * 删除一个会话：正文移入 `.trash/`，**不做物理删除**（D-09 §2.2：v1 不删真数据）。
+   * @param {{ id: string }} arg
+   * @returns {Promise<{ ok: true, trashedTo: string|null }>}
+   *   `trashedTo` 是正文在回收站里的**真实绝对路径**；会话还没有正文文件（刚建、没说过话）
+   *   时为 `null` —— 渲染层据此决定 toast 里要不要写路径，别把 null 漏给用户看。
+   * @throws `SESSION_NOT_FOUND`（索引里没有）/ `SESSION_BUSY`（正在生成回答）
+   */
+  deleteSession: (arg) => call(INVOKE.DELETE_SESSION, arg),
+  /**
+   * 恢复一个已有会话（复用同一个 id 建 Pi 会话，历史进真实模型上下文）。
+   * @param {{ id: string }} arg
+   * @returns {Promise<{ sessionId: string, title: string, lastSeq: number, sceneId: string,
+   *   history: Array<{ role: "user"|"assistant", content: string, timestamp: number }> }>}
+   */
+  resumeSession: (arg) => call(INVOKE.RESUME_SESSION, arg),
+
   /** @param {{ state: "ball"|"mini"|"full" }} arg → { ok, bounds } */
   setWindowState: (arg) => call(INVOKE.SET_WINDOW_STATE, arg),
+
+  /** 置顶开关。@param {{ on: boolean }} arg → { ok, on } */
+  setAlwaysOnTop: (arg) => call(INVOKE.SET_ALWAYS_ON_TOP, arg),
+
+  /** 最小化到任务栏。→ { ok } */
+  minimizeWindow: () => call(INVOKE.MINIMIZE_WINDOW),
+
+  /**
+   * 悬浮球右键菜单：请主进程把窗口临时撑开（球停在原位，菜单画在旁边）。
+   * @returns {Promise<{ ok: boolean, layout: { ball: {x:number,y:number}, menu: {x:number,y:number}, window: {width:number,height:number} } }>}
+   */
+  showBallMenu: () => call(INVOKE.SHOW_BALL_MENU),
+
+  /** 收起球菜单并还原 48×48。→ { ok } */
+  hideBallMenu: () => call(INVOKE.HIDE_BALL_MENU),
+
+  /** 关闭悬浮窗（隐藏窗口；Alt+Space 唤回）。→ { ok } */
+  hideBall: () => call(INVOKE.HIDE_BALL),
+
+  /** 球态手动拖拽：按屏幕像素位移移动窗口。@param {{dx:number,dy:number}} arg → { ok } */
+  /** 拖球三步：开始 / 跟随游标 / 结束（结束会顺带吸边） */
+  ballDragBegin: () => call(INVOKE.BALL_DRAG_BEGIN),
+  ballDragMove: (arg) => call(INVOKE.BALL_DRAG_MOVE, arg),
+  ballDragEnd: () => call(INVOKE.BALL_DRAG_END),
+  /** 球态拖拽结束 → 吸附到最近的屏幕边缘。→ { ok:boolean } */
+  snapBall: () => call(INVOKE.SNAP_BALL),
 
   /** → settings */
   getSettings: () => call(INVOKE.GET_SETTINGS),
 
   /** @param {object} partial → settings */
   setSettings: (partial) => call(INVOKE.SET_SETTINGS, partial),
+  /** → { minipi:{version,electron,chrome,node,platform}, pi:{name,version,aiVersion}, consistent } */
+  getAbout: () => call(INVOKE.GET_ABOUT),
 
   /** → void（App 退出；调用后不要指望还有返回值） */
   quit: () => call(INVOKE.QUIT),
@@ -132,11 +187,27 @@ const minipi = Object.freeze({
   /** @param {{ limit?: number }} [arg] → { items: OutcomeSummary[] } */
   listOutcomes: (arg) => call(INVOKE.LIST_OUTCOMES, arg),
 
+  /* -------- 产出抽屉（D-14：跨重启的持久索引） -------- */
+  /** @param {{ query?: string, limit?: number }} [arg] → { items: Array<{id,fileName,title,format,bytes,createdAt,pinned}> } */
+  listAssets: (arg) => call(INVOKE.LIST_ASSETS, arg),
+  /** @param {{ id: string }} arg → { ok: true }（用系统默认程序打开） */
+  openAsset: (arg) => call(INVOKE.OPEN_ASSET, arg),
+  /** @param {{ id: string }} arg → { ok: true, trashedTo: string } */
+  removeAsset: (arg) => call(INVOKE.REMOVE_ASSET, arg),
+  /** @param {{ id: string }} arg → { ok: true }（在系统文件夹中定位，不打开文件） */
+  revealAsset: (arg) => call(INVOKE.REVEAL_ASSET, arg),
+
   /* -------- 模型配置 -------- */
   /** → { current, defaultModel, models: [{ provider, modelId, name, available, needsAuth }] } */
   listModels: () => call(INVOKE.LIST_MODELS),
   /** → { current, defaultModel, featured: string[], providers: [{ provider, name, baseUrl, api, configured, authSource, custom, edited, modelsEdited, models: [{ modelId, name, api, contextWindow, maxTokens, available }] }] } */
   listProviders: () => call(INVOKE.LIST_PROVIDERS),
+  /**
+   * 模型是否就绪（首启引导用）。
+   * @returns {Promise<{ ready: boolean, reason: string }>}
+   *   `ready:false` 时 `reason` 是给用户看的一句话；**永不 reject**（读不出来也是合法状态）。
+   */
+  modelStatus: () => call(INVOKE.MODEL_STATUS),
   /** @param {{ model: { provider: string, modelId: string } | null }} arg */
   setModel: (arg) => call(INVOKE.SET_MODEL, arg),
   /** @param {{ providerId: string, apiKey: string }} arg；key 只透传，不回显 */
@@ -170,8 +241,25 @@ const minipi = Object.freeze({
   /** @param {(payload: { state: "ball"|"mini"|"full", bounds: {x:number,y:number,width:number,height:number} }) => void} handler */
   onWindowState: (handler) => subscribe(EVENTS.WINDOW_STATE, handler),
 
+  /** @param {(payload: { reason: string }) => void} handler —— 球菜单被主进程收起（失焦/切形态） */
+  onBallMenuClosed: (handler) => subscribe(EVENTS.BALL_MENU_CLOSED, handler),
+
+  /** @param {(payload: { hidden: boolean }) => void} handler —— 球半隐藏状态（用于 50% 透明度） */
+  onBallPeek: (handler) => subscribe(EVENTS.BALL_PEEK, handler),
+
+  /** 鼠标移入球：半隐藏时整球滑出 */
+  ballPeekIn: () => call(INVOKE.BALL_PEEK_IN),
+  /** 鼠标移出球：立刻半隐藏回去 */
+  ballPeekOut: () => call(INVOKE.BALL_PEEK_OUT),
+  /** 点了球：还原为不隐藏，3 秒后再半隐藏 */
+  ballPin: () => call(INVOKE.BALL_PIN),
+
   /** @param {(payload: { action: "toggle" } | { action: "grabSelection", selection: string|null, ok: boolean }) => void} handler */
   onHotkey: (handler) => subscribe(EVENTS.HOTKEY, handler),
+
+  /** 主进程发起的「打开某个面板」请求（托盘菜单用）。
+   *  @param {(payload: { action: "settings" | "about" }) => void} handler */
+  onUiAction: (handler) => subscribe(EVENTS.UI_ACTION, handler),
 
   /** @param {(card: { outcomeId: string, sessionId: string, format: "md"|"docx", degraded: boolean, fileName: string, bytes: number, title: string, createdAt: number, actions: string[], inlineText?: string }) => void} handler */
   onOutcome: (handler) => subscribe(EVENTS.OUTCOME, handler),
