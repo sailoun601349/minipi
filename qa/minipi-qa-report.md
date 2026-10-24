@@ -1,6 +1,6 @@
 # minipi 开发前产物质量验证报告
 
-> 测试人：测试工程师 秦戈
+> 测试人：测试工程师 安全评审
 > 被测对象：`docs/minipi-plan.md`（基准 v0.2）、`docs/minipi-audit.md`（待验证）、`prototype/minipi-prototype.html`（待验证）
 > 验证性质：**找茬**，不是复述他人结论
 > 测试时间：2026-09-22
@@ -706,7 +706,7 @@
 ## 【测试数据清理】
 
 - 本次测试**未向项目目录写入任何数据**；`pretest_` 前缀输入仅存在于浏览器页面内存，未落盘、无残留。
-- 全部测试产物位于系统临时目录 `%TEMP%\minipi_qa\`（脚本 / 截图 / JSON 结果 / 解包的 SDK），**不在项目内**，可由主理人自行知情后删除。
+- 全部测试产物位于系统临时目录 `%TEMP%\minipi_qa\`（脚本 / 截图 / JSON 结果 / 解包的 SDK），**不在项目内**，可由产品负责人自行知情后删除。
 - 临时 Chrome profile 目录：`%TEMP%\minipi_qa_profile*`、`%TEMP%\minipi_qa_prof2_*`、`%TEMP%\minipi_qa_prof3_*`、`%TEMP%\minipi_qa_prof4_*`。
 - 唯一的项目内新增文件是**本报告** `D:\SAiProject\minipi\qa\minipi-qa-report.md`。
 

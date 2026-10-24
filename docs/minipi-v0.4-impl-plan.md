@@ -153,7 +153,7 @@ function isWriteAllowed(targetAbsPath, outboxAbsPath):
     return norm(final) == norm(root) or norm(final).startsWith(norm(root + sep))
 ```
 
-**⚠ Windows 大小写策略（实现回填补充，白客实现比初版方案更完善，采纳）**：NTFS 默认**不区分大小写** ⇒ `...\OUTBOX\a.txt` 与 `...\outbox\a.txt` 物理上是同一目录。若比较时区分大小写，模型传大写的 `OUTBOX` 会被**误杀**（用户莫名被拦，且无安全收益）。⇒ **win32 下比较前 `toLowerCase`；非 Windows 保持区分**（收紧比放松安全）。注意：`OUTBOX-EVIL` 仍会被正确拦截（归一化后仍是 `outbox-evil`，不带 `sep`）。
+**⚠ Windows 大小写策略（实现回填补充，协作方实现比初版方案更完善，采纳）**：NTFS 默认**不区分大小写** ⇒ `...\OUTBOX\a.txt` 与 `...\outbox\a.txt` 物理上是同一目录。若比较时区分大小写，模型传大写的 `OUTBOX` 会被**误杀**（用户莫名被拦，且无安全收益）。⇒ **win32 下比较前 `toLowerCase`；非 Windows 保持区分**（收紧比放松安全）。注意：`OUTBOX-EVIL` 仍会被正确拦截（归一化后仍是 `outbox-evil`，不带 `sep`）。
 
 **四条必须钉死的细节**：
 
@@ -238,7 +238,7 @@ function isWriteAllowed(targetAbsPath, outboxAbsPath):
 
 **编排位置的关键约束**：产出链路要**调一次 LLM 拿 JSON**。主进程**只有 `session.js` 可 import Pi SDK**（团队约定 §约束）⇒ **`outcome/index.js` 不能自己 import SDK**，必须通过 `session.js` 暴露的一个方法（如 `session.generateOutcome(sessionId, intent)`）间接调用。建议在 `session.js` 上新增**唯一一个**出口方法，内部用现有的 Pi 会话完成「一次结构化输出」（复用同一 `ModelRuntime`，不新建会话）。
 
-#### 3.1.1 `session.js` 出口方法签名（已钉死，白客按此实现）
+#### 3.1.1 `session.js` 出口方法签名（已钉死，协作方按此实现）
 
 ```js
 /**
@@ -254,7 +254,7 @@ function isWriteAllowed(targetAbsPath, outboxAbsPath):
 async generateStructured(input) { /* ... */ }
 ```
 
-**实现要点（白客注意，这三条是本任务的难点）**：
+**实现要点（协作方注意，这三条是本任务的难点）**：
 
 1. **拿文本**：在 `registerGate` 的 `tool_call` 钩子之外，另挂一次 `pi.on("message_update", ...)`（或复用订阅）收集 `text_delta` 到本地 buffer，**并同时挂 `pi.on("agent_end")` / `agent_settled`** 作为收口信号 —— 与 `_subscribe()` 里已有的事件判定口径**完全一致**（用 `isTextDelta()` / `isTurnSettled()`，不要另造判断）。
 2. **不污染会话**：本调用**不得**调用 `_appendAndEmit()`、**不得**递增 `rec.seq`。这是刻意的 —— 产出链路是「旁路」，不是对话轮次。
@@ -510,19 +510,19 @@ T0.4 产出链路 ─▶ T1.3 卡片 UI ─▶ T1.6 产出清单
 ## 7. 实现回填（v1.1 新增 · 记录最终实现与方案的偏离/增强）
 
 > 目的：方案是「设计意图」，实现是「最终事实」。两者若有差异，**以本节为准**，供后人（和未来的 AI）读代码时不被方案误导。
-> 状态截至 2026-09-23：T0.3/T0.4/T0.5 已完成并全绿；**M4 审批闸门主进程侧（契约 + 主体 + 接线）已闭环**（`verify:approval` 195 项全绿），M4.5 渲染层已交付（方砚 51/0 自测）、**独立 QA 进行中**（秦戈）。
+> 状态截至 2026-09-23：T0.3/T0.4/T0.5 已完成并全绿；**M4 审批闸门主进程侧（契约 + 主体 + 接线）已闭环**（`verify:approval` 195 项全绿），M4.5 渲染层已交付（前端 51/0 自测）、**独立 QA 进行中**（安全评审）。
 
 ### 7.1 已落地的文件（与 §3.1 设计对照）
 
 | 方案第 §3.1 设计 | 实际文件 | 状态 |
 |---|---|---|
-| `src/main/pi/sandbox.js` | ✅ 存在（11.4KB，白客） | 与设计一致 + 下述增强 |
+| `src/main/pi/sandbox.js` | ✅ 存在（11.4KB，协作方） | 与设计一致 + 下述增强 |
 | `src/main/pi/outcome/schema.js` | ✅ 存在（14.6KB） | **增强**：含宽容归一化 |
 | `src/main/pi/outcome/prompt.js` | ✅ 存在（8.0KB） | 一致 |
 | `src/main/pi/outcome/render-md.js` | ✅ 存在（3.5KB） | 一致 |
 | `src/main/pi/outcome/render-docx.js` | ✅ 存在（4.2KB） | 一致（静态 import docx） |
 | `src/main/pi/outcome/index.js` | ✅ 存在（19.4KB） | 一致（编排 + 降级） |
-| `src/main/pi/approval.js` | ✅ 存在（白客） | **M4 主进程侧已闭环**：审批闸门状态机（pending/resolved、超时、batch、持久化、always-allow）、脱敏（`redactSecrets` 为全仓唯一实现点）。接线见 `session.js` 规则 2 + `main/index.js` + `preload`。**明细与对账见 `docs/minipi-approval-gate-design.md` §9.4（R1–R6 + T5 全 ✅）** |
+| `src/main/pi/approval.js` | ✅ 存在（协作方） | **M4 主进程侧已闭环**：审批闸门状态机（pending/resolved、超时、batch、持久化、always-allow）、脱敏（`redactSecrets` 为全仓唯一实现点）。接线见 `session.js` 规则 2 + `main/index.js` + `preload`。**明细与对账见 `docs/minipi-approval-gate-design.md` §9.4（R1–R6 + T5 全 ✅）** |
 
 ### 7.2 实现相对方案的**增强**（采纳，值得保留）
 
@@ -533,7 +533,7 @@ T0.4 产出链路 ─▶ T1.3 卡片 UI ─▶ T1.6 产出清单
 ### 7.3 实现与方案的**已知差异**（无问题，仅记录）
 
 - §3.1 建议的 `outcome/index.js` **不 import SDK**、经 `session.js` 的 `generateStructured` 间接调用——实现照做（`session.js` 有该方法）。
-- 方案 §3.4 列了 `LIST_OUTCOMES`（P2 产出清单）与 `SAVE_OUTCOME_AS`；实现以 `verify-outcome.mjs` 覆盖的契约为准，是否全接线由方砚的卡片 UI 任务（#24）收口。
+- 方案 §3.4 列了 `LIST_OUTCOMES`（P2 产出清单）与 `SAVE_OUTCOME_AS`；实现以 `verify-outcome.mjs` 覆盖的契约为准，是否全接线由前端的卡片 UI 任务（#24）收口。
 
 ### 7.4 验证脚本矩阵（全绿现状）
 
@@ -551,7 +551,7 @@ T0.4 产出链路 ─▶ T1.3 卡片 UI ─▶ T1.6 产出清单
 
 ### 7.5 待办（回填时未完成）
 
-- **M4.5 渲染层独立 QA**（秦戈 #37 进行中）——方砚自测 51/0，独立 QA 未出结论。
+- **M4.5 渲染层独立 QA**（安全评审 #37 进行中）——前端自测 51/0，独立 QA 未出结论。
 - **真 Electron 端到端**——本机 GPU 崩、起不了真窗口，走 headless Chrome + CDP 兜底；真窗口 E2E 待环境恢复。
 - **commit**——工作区非 git 仓库，尚未提交。
 - **`spike/docx-runtime/package.json.bak`** 临时文件，若 `spike/` 入库建议清理。
@@ -573,4 +573,4 @@ T0.4 产出链路 ─▶ T1.3 卡片 UI ─▶ T1.6 产出清单
 
 > **v0.4 的施工重心是三条**：① 把「场景名」从三档重命名到四档并**一次性全清残留**（P0，最易漏）；② 把 `outbox` 沙箱做成 **`tool_call` 钩子里的一条硬拦规则**（realpath 防符号链接，先于审批，不 fail-open）；③ 把「随手产出」链路按 **md 先行 → docx 补上 → 降级兜底** 的顺序落地（P0 先出 md，P1 出 docx）。**docx 用 npm `docx`（纯 JS，无原生依赖）成立**（已在 Electron 44 主进程实测）；**Jev 本期不碰**。
 >
-> **现状（2026-09-23）**：①②③ 均已落地并通过验证脚本（沙箱 65/65、产出 97/97、一致性 48/48、v04 39/39）；**M4 审批闸门主进程侧（契约 + 主体 + 接线）已闭环**（`verify:approval` 195 项全绿），M4.5 渲染层已交付、独立 QA 进行中（秦戈）。项数以 `npm run verify:all` 各脚本自报为准。
+> **现状（2026-09-23）**：①②③ 均已落地并通过验证脚本（沙箱 65/65、产出 97/97、一致性 48/48、v04 39/39）；**M4 审批闸门主进程侧（契约 + 主体 + 接线）已闭环**（`verify:approval` 195 项全绿），M4.5 渲染层已交付、独立 QA 进行中（安全评审）。项数以 `npm run verify:all` 各脚本自报为准。

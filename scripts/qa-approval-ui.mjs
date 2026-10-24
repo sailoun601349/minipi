@@ -62,16 +62,16 @@ console.log("===================================================================
 group("[A0] 静态审查：契约镜像与关键接线存在");
 {
   const html = fs.readFileSync(HTML_PATH, "utf8");
-  ok(/const APPROVAL_ACTIONS = Object\.freeze\(\['allowOnce', 'deny', 'terminate'\]\)/.test(html), "APPROVAL_ACTIONS 镜像存在且三值正确");
+  ok(/const APPROVAL_ACTIONS = Object\.freeze\(\['allowOnce', 'allowSession', 'denyWithInstruction', 'terminate'\]\)/.test(html), "APPROVAL_ACTIONS 镜像存在且四档正确");
   ok(/function applyApprovalCard/.test(html), "applyApprovalCard 存在");
   ok(/function buildApprovalCard/.test(html), "buildApprovalCard 存在");
   ok(/function tickApprovals/.test(html), "tickApprovals 倒计时函数存在");
   ok(/host\.onApproval\(/.test(html), "已接 host.onApproval");
   ok(/host\.approvalDecide\(/.test(html), "已调 host.approvalDecide");
-  // 铁律：不允许把 action 硬编码成三个按钮（必须从 card.actions 迭代）
-  ok(/for \(const action of card\.actions\)/.test(html), "三按钮由 card.actions 迭代（未硬编码）");
-  // 默认不勾
-  ok(/cb\.checked = false;/.test(html), "勾选框默认不勾");
+  // 铁律：不允许把 action 硬编码成固定按钮（必须从 card.actions 迭代）
+  ok(/for \(const action of card\.actions\)/.test(html), "四档按钮由 card.actions 迭代（未硬编码）");
+  // 「拒绝并说明」必须有输入框（四档里唯一需要敲字的档位）
+  ok(/data-approval-instruction/.test(html), "存在「拒绝并说明」的输入框接线");
 }
 
 /* ---------------- Chrome 就绪 ---------------- */
@@ -159,7 +159,7 @@ if (!CHROME) {
     const base = (over) => `window.__minipi.injectApproval(Object.assign({
       approvalId:'a_test', sessionId:'s_1', phase:'push',
       kind:'edit', toolName:'edit', title:'修改文件',
-      actions:['allowOnce','deny','terminate'], alwaysAllowEligible:true,
+      actions:['allowOnce','allowSession','denyWithInstruction','terminate'], alwaysAllowEligible:true,
       createdAt: Date.now(), expiresAt: Date.now()+300000, timeoutMs:300000,
       batch:[{ kind:'edit', toolName:'edit', title:'修改文件', path:'~/.minipi/repo/src/a.js',
         diff:'@@ edit 1/1\\n- const a = 1;\\n+ const a = 2;', diffStat:{added:1,removed:1}, tooLargeToDiff:false }]
@@ -206,23 +206,23 @@ if (!CHROME) {
       await sleep(80);
     }
 
-    /* ========================================================= [A4] 三按钮 + 勾选框 */
-    group("[A4] 三按钮（恒以 actions 为准）+「本会话总是允许」默认不勾");
+    /* ========================================================= [A4] 四档按钮 + 说明输入框 */
+    group("[A4] 四档按钮（恒以 actions 为准）+「拒绝并说明」输入框");
     {
       await evaluate(base({}));
       await sleep(120);
-      const snap = await evaluate("window.__minipi.approvalSnapshot()");
-      ok(JSON.stringify(snap.actions) === JSON.stringify(['allowOnce', 'deny', 'terminate']), "三按钮 action 值 = allowOnce/deny/terminate", JSON.stringify(snap.actions));
-      ok(JSON.stringify(snap.actionLabels) === JSON.stringify(['允许一次', '拒绝', '中断整轮']), "三按钮文案 = 允许一次/拒绝/中断整轮", JSON.stringify(snap.actionLabels));
-      ok(snap.hasRememberBox === true, "alwaysAllowEligible:true → 画勾选框");
-      ok(snap.rememberChecked === false, "勾选框默认不勾");
+      const snap = await evaluate("(()=>{const c=document.querySelector('#miniBody .approval');const bs=[...c.querySelectorAll('[data-approval-action]')];return {actions:bs.map(b=>b.getAttribute('data-approval-action')), labels:bs.map(b=>b.textContent.trim()), hasInstr:!!c.querySelector('[data-approval-instruction]'), allowSessionDisabled:(bs.find(b=>b.getAttribute('data-approval-action')==='allowSession')||{}).disabled===true};})()");
+      ok(JSON.stringify(snap.actions) === JSON.stringify(['allowOnce','allowSession','denyWithInstruction','terminate']), "四档 action 值 = allowOnce/allowSession/denyWithInstruction/terminate", JSON.stringify(snap.actions));
+      ok(JSON.stringify(snap.labels) === JSON.stringify(['允许一次','本会话允许此文件','拒绝并说明','终止本轮']), "四档文案 = 允许一次/本会话允许此文件/拒绝并说明/终止本轮", JSON.stringify(snap.labels));
+      ok(snap.hasInstr === true, "画「拒绝并说明」输入框");
+      ok(snap.allowSessionDisabled === false, "alwaysAllowEligible:true → 「本会话允许此文件」可点");
 
-      // actions 子集：只给 allowOnce/deny → 只画两个按钮（验证不硬编码）
-      await evaluate("window.__minipi.injectApproval({approvalId:'a_subset', phase:'push', kind:'edit', toolName:'edit', title:'x', alwaysAllowEligible:false, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','deny'], batch:[{kind:'edit', toolName:'edit', title:'x', path:'a', diff:'@', diffStat:{added:0,removed:0}}]})");
+      // actions 子集：只给 allowOnce/denyWithInstruction → 只画两个按钮（验证不硬编码）
+      await evaluate("window.__minipi.injectApproval({approvalId:'a_subset', phase:'push', kind:'edit', toolName:'edit', title:'x', alwaysAllowEligible:false, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','denyWithInstruction'], batch:[{kind:'edit', toolName:'edit', title:'x', path:'a', diff:'@', diffStat:{added:0,removed:0}}]})");
       await sleep(120);
-      const snap2 = await evaluate("(()=>{const c=document.querySelector('#miniBody .approval[data-approval-id=\"a_subset\"]');return {acts:[...c.querySelectorAll('[data-approval-action]')].map(b=>b.getAttribute('data-approval-action')), hasRemember:!!c.querySelector('[data-approval-remember]')};})()");
-      ok(JSON.stringify(snap2.acts) === JSON.stringify(['allowOnce', 'deny']), "actions 给两项 → 只画两项（证明以 card.actions 为准）", JSON.stringify(snap2.acts));
-      ok(snap2.hasRemember === false, "alwaysAllowEligible:false → 不画勾选框");
+      const snap2 = await evaluate("(()=>{const c=document.querySelector('#miniBody .approval[data-approval-id=\"a_subset\"]');const bs=[...c.querySelectorAll('[data-approval-action]')];return {acts:bs.map(b=>b.getAttribute('data-approval-action')), allowSession:!!bs.find(b=>b.getAttribute('data-approval-action')==='allowSession')};})()");
+      ok(JSON.stringify(snap2.acts) === JSON.stringify(['allowOnce','denyWithInstruction']), "actions 给两项 → 只画两项（证明以 card.actions 为准）", JSON.stringify(snap2.acts));
+      ok(snap2.allowSession === false, "actions 里没有 allowSession ⇒ 不画该按钮");
       await evaluate("window.__minipi.injectApproval({approvalId:'a_test', phase:'cancel'});window.__minipi.injectApproval({approvalId:'a_subset', phase:'cancel'})");
       await sleep(80);
     }
@@ -230,17 +230,17 @@ if (!CHROME) {
     /* ========================================================= [A5] 倒计时 */
     group("[A5] 倒计时：文本 + 到 0 置灰 + 保留卡（等 cancel）");
     {
-      await evaluate("window.__minipi.injectApproval({approvalId:'a_short', phase:'push', kind:'edit', toolName:'edit', title:'修改文件', alwaysAllowEligible:true, createdAt:Date.now(), expiresAt:Date.now()+1500, timeoutMs:1500, actions:['allowOnce','deny','terminate'], batch:[{kind:'edit', toolName:'edit', title:'修改文件', path:'~/.minipi/repo/a.js', diff:'@@\\n- a\\n+ b', diffStat:{added:1,removed:1}}]})");
+      await evaluate("window.__minipi.injectApproval({approvalId:'a_short', phase:'push', kind:'edit', toolName:'edit', title:'修改文件', alwaysAllowEligible:true, createdAt:Date.now(), expiresAt:Date.now()+1500, timeoutMs:1500, actions:['allowOnce','allowSession','denyWithInstruction','terminate'], batch:[{kind:'edit', toolName:'edit', title:'修改文件', path:'~/.minipi/repo/a.js', diff:'@@\\n- a\\n+ b', diffStat:{added:1,removed:1}}]})");
       await sleep(200);
       const t1 = await evaluate("(()=>{const el=document.querySelector('#miniBody [data-approval-timer]');return el?el.textContent:null;})()");
       ok(/^剩 0:0\d$|^剩 0:1\d$/.test(t1 || ""), "倒计时显示「剩 m:ss」", t1);
       // 等它过期（短路：注入一张已过期的卡，避免依赖真实秒级等待的抖动）
-      await evaluate("window.__minipi.injectApproval({approvalId:'a_short', phase:'update', kind:'edit', toolName:'edit', title:'修改文件', alwaysAllowEligible:true, createdAt:Date.now()-9000, expiresAt:Date.now()-1000, timeoutMs:1500, actions:['allowOnce','deny','terminate'], batch:[{kind:'edit', toolName:'edit', title:'修改文件', path:'~/.minipi/repo/a.js', diff:'@@\\n- a\\n+ b', diffStat:{added:1,removed:1}}]})");
+      await evaluate("window.__minipi.injectApproval({approvalId:'a_short', phase:'update', kind:'edit', toolName:'edit', title:'修改文件', alwaysAllowEligible:true, createdAt:Date.now()-9000, expiresAt:Date.now()-1000, timeoutMs:1500, actions:['allowOnce','allowSession','denyWithInstruction','terminate'], batch:[{kind:'edit', toolName:'edit', title:'修改文件', path:'~/.minipi/repo/a.js', diff:'@@\\n- a\\n+ b', diffStat:{added:1,removed:1}}]})");
       await sleep(1200);   // 让至少一次 tickApprovals 跑过
       const snap = await evaluate("window.__minipi.approvalSnapshot()");
       ok(snap.expired === true, "到 0 → 卡片加 .approval--expired（置灰）");
       ok(snap.timerText === '已超时', "到 0 → 倒计时文本变「已超时」", snap.timerText);
-      ok(snap.buttonsDisabled.every((d) => d === true), "到 0 → 三按钮全部禁用", JSON.stringify(snap.buttonsDisabled));
+      ok(snap.buttonsDisabled.every((d) => d === true), "到 0 → 四档按钮全部禁用", JSON.stringify(snap.buttonsDisabled));
       const stillThere = await evaluate("window.__minipi.approvalCount()");
       ok(stillThere >= 1, "到 0 **不移除**卡片（等后端 cancel）", `count=${stillThere}`);
       // 推 cancel → 移除
@@ -273,7 +273,7 @@ if (!CHROME) {
     /* ========================================================= [A7] 合并卡 + 360 不溢出 */
     group("[A7] 合并卡（3 项）+ 360×480 不溢出/高度可控");
     {
-      await evaluate(`window.__minipi.injectApproval({approvalId:'a_mix', phase:'push', kind:null, toolName:null, title:'共 3 项', alwaysAllowEligible:false, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','deny','terminate'], batch:[
+      await evaluate(`window.__minipi.injectApproval({approvalId:'a_mix', phase:'push', kind:null, toolName:null, title:'共 3 项', alwaysAllowEligible:false, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','allowSession','denyWithInstruction','terminate'], batch:[
         {kind:'write',toolName:'write',title:'写入文件',path:'~/.minipi/repo/docs/学习笔记.md',bytes:2048,preview:'# 学习笔记\\n- 一阶泰勒展开\\n- 二阶项可忽略',overwrite:false},
         {kind:'edit',toolName:'edit',title:'修改文件',path:'~/.minipi/repo/src/main/pi/session.js',diff:'@@ edit 1/1\\n- const timeout = 30000;\\n+ const timeout = 60000;',diffStat:{added:1,removed:1},tooLargeToDiff:false},
         {kind:'command',toolName:'bash',title:'执行命令',shell:'bash',command:'rm -rf node_modules && npm ci',timeoutSec:120,risk:'high'}
@@ -298,13 +298,13 @@ if (!CHROME) {
       // 单条（非合并）卡应能装进 480 高可视区（合并卡允许纵向滚动，不硬断言）
       await evaluate("window.__minipi.injectApproval({approvalId:'a_mix',phase:'cancel'})");
       await sleep(60);
-      await evaluate("window.__minipi.injectApproval({approvalId:'a_one', phase:'push', kind:'command', toolName:'bash', title:'执行命令', alwaysAllowEligible:true, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','deny','terminate'], batch:[{kind:'command',toolName:'bash',title:'执行命令',shell:'bash',command:'npm test',timeoutSec:null,risk:'normal'}]})");
+      await evaluate("window.__minipi.injectApproval({approvalId:'a_one', phase:'push', kind:'command', toolName:'bash', title:'执行命令', alwaysAllowEligible:true, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','allowSession','denyWithInstruction','terminate'], batch:[{kind:'command',toolName:'bash',title:'执行命令',shell:'bash',command:'npm test',timeoutSec:null,risk:'normal'}]})");
       await sleep(150);
       const one = await evaluate("window.__minipi.approvalMetrics()");
       ok(one && one.cardHeight <= 480, "单条 command 卡高度 ≤ 480（装得进小窗可视区）", one ? `h=${Math.round(one.cardHeight)}` : "n/a");
       await evaluate("window.__minipi.injectApproval({approvalId:'a_one',phase:'cancel'})");
       await sleep(60);
-      await evaluate("window.__minipi.injectApproval({approvalId:'a_mix', phase:'push', kind:null, toolName:null, title:'共 3 项', alwaysAllowEligible:false, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','deny','terminate'], batch:[{kind:'write',toolName:'write',title:'写入文件',path:'~/.minipi/repo/docs/n.md',bytes:2048,preview:'# x',overwrite:false},{kind:'edit',toolName:'edit',title:'修改文件',path:'~/.minipi/repo/src/s.js',diff:'@@ edit 1/1\\n- a\\n+ b',diffStat:{added:1,removed:1}},{kind:'command',toolName:'bash',title:'执行命令',shell:'bash',command:'npm test',timeoutSec:null,risk:'normal'}]})");
+      await evaluate("window.__minipi.injectApproval({approvalId:'a_mix', phase:'push', kind:null, toolName:null, title:'共 3 项', alwaysAllowEligible:false, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allowOnce','allowSession','denyWithInstruction','terminate'], batch:[{kind:'write',toolName:'write',title:'写入文件',path:'~/.minipi/repo/docs/n.md',bytes:2048,preview:'# x',overwrite:false},{kind:'edit',toolName:'edit',title:'修改文件',path:'~/.minipi/repo/src/s.js',diff:'@@ edit 1/1\\n- a\\n+ b',diffStat:{added:1,removed:1}},{kind:'command',toolName:'bash',title:'执行命令',shell:'bash',command:'npm test',timeoutSec:null,risk:'normal'}]})");
       await sleep(120);
       await evaluate("window.__minipi.injectApproval({approvalId:'a_mix',phase:'cancel'})");
       await sleep(80);
@@ -363,15 +363,15 @@ if (!CHROME) {
       ok(bannerHidden === true, "撤回后 → 横幅隐藏");
     }
 
-    /* ========================================================= [A11] actions 全非法 → 回退三按钮（P2-UI-1） */
-    group("[A11] actions 非空但全非法 → 回退契约镜像三按钮（不死卡，P2-UI-1 回归）");
+    /* ========================================================= [A11] actions 全非法 → 回退四档按钮（P2-UI-1） */
+    group("[A11] actions 非空但全非法 → 回退契约镜像四档按钮（不死卡，P2-UI-1 回归）");
     {
       await evaluate("window.__minipi.injectApproval({approvalId:'a_allbad', phase:'push', kind:'edit', toolName:'edit', title:'修改文件', alwaysAllowEligible:true, createdAt:Date.now(), expiresAt:Date.now()+300000, timeoutMs:300000, actions:['allow','evil'], batch:[{kind:'edit',toolName:'edit',title:'修改文件',path:'a',diff:'@',diffStat:{added:0,removed:0}}]})");
       await sleep(120);
       const acts = await evaluate("[...document.querySelectorAll('#miniBody .approval[data-approval-id=\"a_allbad\"] [data-approval-action]')].map(b=>b.getAttribute('data-approval-action'))");
-      ok(JSON.stringify(acts) === JSON.stringify(['allowOnce','deny','terminate']), "actions 全非法 → 回退三按钮（allowOnce/deny/terminate），而非 0 按钮", JSON.stringify(acts));
+      ok(JSON.stringify(acts) === JSON.stringify(['allowOnce','allowSession','denyWithInstruction','terminate']), "actions 全非法 → 回退四档按钮，而非 0 按钮", JSON.stringify(acts));
       const disabled = await evaluate("[...document.querySelectorAll('#miniBody .approval[data-approval-id=\"a_allbad\"] [data-approval-action]')].map(b=>b.disabled)");
-      ok(Array.isArray(disabled) && disabled.length === 3 && disabled.every((d) => d === false), "回退后的三按钮全部可点（非死卡）", JSON.stringify(disabled));
+      ok(Array.isArray(disabled) && disabled.length === 4 && disabled.every((d) => d === false), "回退后的四档按钮全部可点（非死卡）", JSON.stringify(disabled));
       await evaluate("window.__minipi.injectApproval({approvalId:'a_allbad',phase:'cancel'})");
       await sleep(80);
     }
@@ -407,7 +407,7 @@ if (!CHROME) {
     finding("P1", "A-HARNESS", "headless 测试过程抛错（环境问题，非产品缺陷）", String(err));
     ok(false, `headless 测试完成（异常：${String(err).slice(0, 140)}）`);
   } finally {
-    // ⚠ Windows 上 chrome.kill() 偶发把进程组带崩（SIGTERM），先打印汇总再动进程（同秦戈）。
+    // ⚠ Windows 上 chrome.kill() 偶发把进程组带崩（SIGTERM），先打印汇总再动进程（同安全评审）。
     finish();
     try { conn && conn.close(); } catch { /* ignore */ }
     try { chrome && chrome.kill(); } catch { /* ignore */ }

@@ -71,7 +71,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "minipi-approval-test-"));
 const home = path.join(tmp, "home");
 const appDir = path.join(home, ".minipi");
 fs.mkdirSync(appDir, { recursive: true });
-const cwd = path.join(home, ".minipi", "repo");
+const cwd = path.join(home, ".minipi", "work");
 fs.mkdirSync(cwd, { recursive: true });
 
 /** 造一个带 bridge 记录器的 gate。@returns {{gate:ApprovalGate, pushed:object[], audited:object[]}} */
@@ -99,7 +99,7 @@ console.log("\n[1] 建 pending 返回 allow / deny / terminate");
 {
   const { gate, pushed, audited } = makeGate();
 
-  const p1 = gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "npm test" }, cwd });
+  const p1 = gate.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "npm test" }, cwd });
   ok(gate.pendingCount === 1, "request 后 pendingCount = 1");
   ok(pushed.length === 1 && pushed[0].phase === "push", "第一张卡 phase = push");
   ok(pushed[0].batch.length === 1 && pushed[0].batch[0].kind === "command", "卡内 batch[0].kind = command");
@@ -116,14 +116,14 @@ console.log("\n[1] 建 pending 返回 allow / deny / terminate");
   ok(audited.some((a) => a.event === "allowed"), "审计记了 allowed");
 
   const { gate: g2 } = makeGate();
-  const p2 = g2.request({ sessionId: "s_2", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "hi" }, cwd });
+  const p2 = g2.request({ sessionId: "s_2", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "hi" }, cwd });
   g2.decide({ approvalId: "a_1", action: "deny" });
   const r2 = await p2;
   ok(r2.action === "deny", "deny 决策回传 action=deny");
   ok(typeof r2.reason === "string" && r2.reason.includes("explicitly denied"), "deny reason 用主动拒绝文案");
 
   const { gate: g3 } = makeGate();
-  const p3 = g3.request({ sessionId: "s_3", sceneId: "repo", toolName: "edit", input: { path: "b.js", edits: [{ oldText: "a", newText: "b" }] }, cwd });
+  const p3 = g3.request({ sessionId: "s_3", sceneId: "work", toolName: "edit", input: { path: "b.js", edits: [{ oldText: "a", newText: "b" }] }, cwd });
   g3.decide({ approvalId: "a_1", action: "terminate" });
   const r3 = await p3;
   ok(r3.action === "terminate", "terminate 决策回传 action=terminate");
@@ -133,7 +133,7 @@ console.log("\n[1] 建 pending 返回 allow / deny / terminate");
 console.log("\n[1b] decide 的错误路径");
 {
   const { gate } = makeGate();
-  gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  gate.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
 
   let threw = null;
   try {
@@ -161,7 +161,7 @@ console.log("\n[1b] decide 的错误路径");
   }
   ok(typeof threw3 === "string" && threw3.startsWith("APPROVAL_NOT_FOUND"), "已决 id 再 decide ⇒ APPROVAL_NOT_FOUND");
 
-  ok(APPROVAL_ACTIONS.join(",") === "allowOnce,deny,terminate", "APPROVAL_ACTIONS 三值域");
+  ok(APPROVAL_ACTIONS.join(",") === "allowOnce,allowSession,denyWithInstruction,terminate", "APPROVAL_ACTIONS 四值域");
   ok(APPROVAL_TOOLS.join(",") === "write,edit,bash,powershell", "APPROVAL_TOOLS 四个工具");
 }
 
@@ -170,7 +170,7 @@ console.log("\n[2] 5 分钟超时 = deny 且 reason 含 did not respond");
 {
   // 用极短超时模拟 5 分钟（不真等 5 分钟）
   const { gate, pushed, audited } = makeGate({ timeoutMs: 60 });
-  const p = gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "npm test" }, cwd });
+  const p = gate.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "npm test" }, cwd });
   const r = await p;
   ok(r.action === "deny", "超时 ⇒ action = deny（fail-closed）");
   ok(typeof r.reason === "string" && r.reason.includes("did not respond"), "超时 reason 含 did not respond");
@@ -235,7 +235,7 @@ console.log("\n[4] 多 ask 合并进一张卡且不超 20 条");
   const { gate, pushed } = makeGate();
   const promises = [];
   for (let i = 0; i < 5; i += 1) {
-    promises.push(gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: `echo ${i}` }, cwd }));
+    promises.push(gate.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: `echo ${i}` }, cwd }));
   }
   ok(gate.pendingCount === 1, "5 次 ask 仍只有 1 张未决卡");
   const lastPush = pushed[pushed.length - 1];
@@ -252,7 +252,7 @@ console.log("\n[4] 多 ask 合并进一张卡且不超 20 条");
   // 上限：batchMax=3 时第 4 条新建卡
   const { gate: g2, pushed: p2 } = makeGate({ batchMax: 3 });
   for (let i = 0; i < 4; i += 1) {
-    g2.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: `c${i}` }, cwd });
+    g2.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: `c${i}` }, cwd });
   }
   ok(g2.pendingCount === 2, "超 batchMax ⇒ 新建第二张卡");
   ok(p2.filter((c) => c.phase === "push").length === 2, "推了两张 push 卡");
@@ -261,8 +261,8 @@ console.log("\n[4] 多 ask 合并进一张卡且不超 20 条");
 
   // 跨会话不合并
   const { gate: g3 } = makeGate();
-  g3.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "a" }, cwd });
-  g3.request({ sessionId: "s_2", sceneId: "repo", toolName: "bash", input: { command: "b" }, cwd });
+  g3.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "a" }, cwd });
+  g3.request({ sessionId: "s_2", sceneId: "work", toolName: "bash", input: { command: "b" }, cwd });
   ok(g3.pendingCount === 2, "不同 sessionId 不合并（各自一张卡）");
 }
 
@@ -309,7 +309,7 @@ console.log("\n[5] 重启丢弃 pending（不变 allow）");
 /* ================================================================== ⑥ */
 console.log("\n[6] 审计脱敏（家目录→~ / 绝对路径→<path:文件> / 密钥→<redacted>）");
 {
-  const s1 = sanitizeForAudit(`写文件 ${path.join(home, ".minipi", "repo", "secret.txt")}`, 300, home);
+  const s1 = sanitizeForAudit(`写文件 ${path.join(home, ".minipi", "work", "secret.txt")}`, 300, home);
   ok(s1.includes("~"), "家目录 → ~");
   ok(!s1.includes(home), "不含原始家目录");
   // 家目录内的路径被 ~ 化后**保留可读结构**（与 session.js:sanitizeDetail 同口径，设计 §7.2）
@@ -371,7 +371,7 @@ console.log("\n[7] 高危命令标记（只提示、不拦截）");
 console.log("\n[8] 非审批工具 & fail-closed 兜底");
 {
   const { gate, pushed } = makeGate();
-  const r = await gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "read", input: { path: "a.txt" }, cwd });
+  const r = await gate.request({ sessionId: "s_1", sceneId: "work", toolName: "read", input: { path: "a.txt" }, cwd });
   ok(r.action === "allowOnce", "非审批工具（read）⇒ 直接放行");
   ok(pushed.length === 0, "非审批工具不建卡");
   ok(gate.pendingCount === 0, "非审批工具不产生 pending");
@@ -387,7 +387,7 @@ console.log("\n[8] 非审批工具 & fail-closed 兜底");
 
   // 会话销毁 ⇒ 该会话 pending 默认拒绝
   const { gate: g4, audited: a4 } = makeGate();
-  const p4 = g4.request({ sessionId: "s_del", sceneId: "repo", toolName: "bash", input: { command: "x" }, cwd });
+  const p4 = g4.request({ sessionId: "s_del", sceneId: "work", toolName: "bash", input: { command: "x" }, cwd });
   ok(g4.pendingCount === 1, "会话销毁前有 1 条 pending");
   g4.cancelBySession("s_del");
   const r4 = await p4;
@@ -429,7 +429,7 @@ console.log("\n[9] registerGate 接线（M4.3：沙箱 → 审批 顺序 / 场�
 
   // repo：4 个审批工具都弹卡
   for (const toolName of ["write", "edit", "bash", "powershell"]) {
-    const h = mount("repo", cwd, gate);
+    const h = mount("work", cwd, gate);
     const before = pushed.length;
     const p = h({ toolName, input: sampleInput(toolName), cwd });
     ok(pushed.length === before + 1, `repo + ${toolName} ⇒ 弹卡`);
@@ -442,7 +442,7 @@ console.log("\n[9] registerGate 接线（M4.3：沙箱 → 审批 顺序 / 场�
 
   // repo：只读工具不弹卡
   {
-    const h = mount("repo", cwd, gate);
+    const h = mount("work", cwd, gate);
     const before = pushed.length;
     const r = await h({ toolName: "read", input: { path: "x" }, cwd });
     ok(pushed.length === before, "repo + read ⇒ 不弹卡");
@@ -451,7 +451,7 @@ console.log("\n[9] registerGate 接线（M4.3：沙箱 → 审批 顺序 / 场�
 
   // repo + deny ⇒ { block: true, reason }
   {
-    const h = mount("repo", cwd, gate);
+    const h = mount("work", cwd, gate);
     const p = h({ toolName: "bash", input: { command: "rm -rf /" }, cwd });
     const id = pushed[pushed.length - 1].approvalId;
     gate.decide({ approvalId: id, action: "deny" });
@@ -462,7 +462,7 @@ console.log("\n[9] registerGate 接线（M4.3：沙箱 → 审批 顺序 / 场�
 
   // repo + terminate ⇒ { block, terminate: true }
   {
-    const h = mount("repo", cwd, gate);
+    const h = mount("work", cwd, gate);
     const p = h({ toolName: "bash", input: { command: "ls" }, cwd });
     const id = pushed[pushed.length - 1].approvalId;
     gate.decide({ approvalId: id, action: "terminate" });
@@ -471,7 +471,7 @@ console.log("\n[9] registerGate 接线（M4.3：沙箱 → 审批 顺序 / 场�
   }
 
   // outbox 场景（quick/note/desk）+ bash ⇒ 不弹卡（场景分流）
-  for (const sceneId of ["quick", "note", "desk"]) {
+  for (const sceneId of ["chat", "chat", "chat"]) {
     const h = mount(sceneId, OUTBOX_DIR, gate);
     const before = pushed.length;
     const r = await h({ toolName: "bash", input: { command: "ls" }, cwd: OUTBOX_DIR });
@@ -481,7 +481,7 @@ console.log("\n[9] registerGate 接线（M4.3：沙箱 → 审批 顺序 / 场�
 
   // 顺序：note 场景 + 越出 outbox 的 write ⇒ 沙箱 block（不是弹卡）
   {
-    const h = mount("note", OUTBOX_DIR, gate);
+    const h = mount("chat", OUTBOX_DIR, gate);
     const before = pushed.length;
     const r = await h({ toolName: "write", input: { path: "../../evil.txt" }, cwd: OUTBOX_DIR });
     ok(r && r.block === true, "note + 越界 write ⇒ 沙箱 block");
@@ -493,7 +493,7 @@ console.log("\n[9] registerGate 接线（M4.3：沙箱 → 审批 顺序 / 场�
   {
     const host = new PiSessionHost({ emit() {}, logger: { info() {}, warn() {}, error() {} } });
     const pi = fakePi();
-    host.registerGate(pi, { sessionId: "s_t", sceneId: "repo", cwd });
+    host.registerGate(pi, { sessionId: "s_t", sceneId: "work", cwd });
     const r = await pi.handlers[0]({ toolName: "bash", input: { command: "ls" }, cwd });
     ok(r === undefined, "未注入 approval ⇒ repo 放行（退化行为）");
   }
@@ -515,42 +515,42 @@ console.log("\n[10] R3：terminate 文案 ≠ deny 文案（三套分开）");
      "TERMINATE 文案点明「整轮已停」");
 
   const { gate } = makeGate();
-  const p = gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p = gate.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   gate.decide({ approvalId: "a_1", action: "terminate" });
   const r = await p;
   ok(r.reason === DENY_REASON_TERMINATE, "terminate 决策回传 TERMINATE 文案");
   ok(r.reason !== DENY_REASON_USER, "terminate 不再复用 deny 文案");
 
   const { gate: g2 } = makeGate();
-  const p2 = g2.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p2 = g2.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   g2.decide({ approvalId: "a_1", action: "deny" });
   const r2 = await p2;
   ok(r2.reason === DENY_REASON_USER, "deny 决策仍用 USER 文案");
 
   // 超时 / cancelBySession 文案保持不变（回归）
   const { gate: g3 } = makeGate({ timeoutMs: 40 });
-  const r3 = await g3.request({ sessionId: "s_t", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const r3 = await g3.request({ sessionId: "s_t", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   ok(r3.reason === DENY_REASON_TIMEOUT, "超时文案不受 R3 影响（仍 TIMEOUT）");
   const { gate: g4 } = makeGate();
-  const p4 = g4.request({ sessionId: "s_del", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p4 = g4.request({ sessionId: "s_del", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   g4.cancelBySession("s_del");
   const r4 = await p4;
   ok(r4.reason === DENY_REASON_USER, "cancelBySession 仍用 USER 文案");
 }
 
 /* ================================================================== ⑪ R4 */
-console.log("\n[11] R4：审批卡补齐 6 个卡级字段 + actions 三值");
+console.log("\n[11] R4：审批卡补齐 6 个卡级字段 + actions 四档");
 {
   const { gate, pushed } = makeGate();
-  const pending = gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "npm test" }, cwd });
+  const pending = gate.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "npm test" }, cwd });
   const push = pushed[0];
   ok(push.sessionId === "s_1", "卡带 sessionId");
   ok(push.kind === "command", "卡带 kind");
   ok(push.toolName === "bash", "卡带 toolName");
   ok(typeof push.title === "string" && push.title.length > 0, "卡带 title");
-  ok(Array.isArray(push.actions) && push.actions.length === 3, "卡带 actions 且长度 3");
-  ok(push.actions.join(",") === "allowOnce,deny,terminate", "actions 就是三值域");
-  ok(push.alwaysAllowEligible === true, "单工具卡 alwaysAllowEligible = true");
+  ok(Array.isArray(push.actions) && push.actions.length === 4, "卡带 actions 且长度 4");
+  ok(push.actions.join(",") === "allowOnce,allowSession,denyWithInstruction,terminate", "actions 就是四值域");
+  ok(push.alwaysAllowEligible === false, "单工具的命令卡 alwaysAllowEligible = false（命令类没有文件可记忆）");
   ok(push.phase === "push", "phase = push");
 
   // cancel 卡：只带 id + phase + actions，batch 为空、无 kind
@@ -559,12 +559,12 @@ console.log("\n[11] R4：审批卡补齐 6 个卡级字段 + actions 三值");
   const cancel = pushed.find((c) => c.phase === "cancel");
   ok(cancel && cancel.batch.length === 0, "cancel 卡 batch 为空");
   ok(cancel && cancel.kind === undefined, "cancel 卡不带 kind");
-  ok(cancel && cancel.actions.length === 3, "cancel 卡仍带 actions（方砚可复用按钮布局）");
+  ok(cancel && cancel.actions.length === 4, "cancel 卡仍带 actions（前端可复用按钮布局）");
 
   // update 卡（批合并）也带三个字段
   const { gate: g2, pushed: p2 } = makeGate();
-  g2.request({ sessionId: "s_1", sceneId: "repo", toolName: "write", input: { path: "a.md", content: "x" }, cwd });
-  g2.request({ sessionId: "s_1", sceneId: "repo", toolName: "write", input: { path: "b.md", content: "y" }, cwd });
+  g2.request({ sessionId: "s_1", sceneId: "work", toolName: "write", input: { path: "a.md", content: "x" }, cwd });
+  g2.request({ sessionId: "s_1", sceneId: "work", toolName: "write", input: { path: "b.md", content: "y" }, cwd });
   const upd = p2[p2.length - 1];
   ok(upd.phase === "update" && upd.kind === "write" && upd.toolName === "write", "update 卡带 kind/toolName");
   ok(upd.alwaysAllowEligible === true, "单工具合并卡 alwaysAllowEligible = true");
@@ -575,72 +575,83 @@ console.log("\n[11] R4：审批卡补齐 6 个卡级字段 + actions 三值");
   ok(mixedMeta.alwaysAllowEligible === false, "混合 kind 批 alwaysAllowEligible = false（不发明逐条 remember）");
 
   const { gate: g3, pushed: p3 } = makeGate();
-  g3.request({ sessionId: "s_1", sceneId: "repo", toolName: "write", input: { path: "a.md", content: "x" }, cwd });
-  g3.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  g3.request({ sessionId: "s_1", sceneId: "work", toolName: "write", input: { path: "a.md", content: "x" }, cwd });
+  g3.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   const mixedPush = p3[p3.length - 1];
   ok(mixedPush.alwaysAllowEligible === false, "真实混合批推卡 alwaysAllowEligible = false");
 }
 
 /* ================================================================== ⑫ R5 */
-console.log("\n[12] R5：本会话总是允许（默认关 / 仅内存 / 仅 IPC remember 能开 / 审计）");
+console.log("\n[12] 本会话允许此文件（默认关 / 仅内存 / 仅 IPC 能开 / 按文件不按工具 / 审计）");
 {
-  // 默认关：同工具第二次仍推卡
-  const { gate, pushed } = makeGate();
-  const p1 = gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "a" }, cwd });
-  gate.decide({ approvalId: "a_1", action: "allowOnce" }); // 不带 remember
-  await p1;
-  ok(gate.isAlwaysAllowed("s_1", "bash") === false, "缺省 remember ⇒ 不开启 always-allow");
-  const before = pushed.length;
-  gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "b" }, cwd });
-  ok(pushed.length === before + 1, "默认关：第二次同工具仍推卡");
+  const A = path.join(cwd, "a.md");
+  const B = path.join(cwd, "b.md");
 
-  // remember:true ⇒ 开启 ⇒ 同会话同工具不再推卡
+  // 默认关：同一文件第二次仍推卡
+  const { gate, pushed } = makeGate();
+  const p1 = gate.request({ sessionId: "s_1", sceneId: "work", toolName: "write", input: { path: "a.md", content: "1" }, cwd });
+  gate.decide({ approvalId: "a_1", action: "allowOnce" }); // 不带 allowSession
+  await p1;
+  ok(gate.isAlwaysAllowed("s_1", "write", A) === false, "缺省 allowSession ⇒ 不开启文件记忆");
+  const before = pushed.length;
+  gate.request({ sessionId: "s_1", sceneId: "work", toolName: "write", input: { path: "a.md", content: "2" }, cwd });
+  ok(pushed.length === before + 1, "默认关：第二次同文件仍推卡");
+
+  // allowSession ⇒ 开启 ⇒ 同会话同文件不再推卡
   const { gate: g2, pushed: p2, audited: a2 } = makeGate();
-  const q1 = g2.request({ sessionId: "s_2", sceneId: "repo", toolName: "bash", input: { command: "a" }, cwd });
-  g2.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
+  const q1 = g2.request({ sessionId: "s_2", sceneId: "work", toolName: "write", input: { path: "a.md", content: "1" }, cwd });
+  g2.decide({ approvalId: "a_1", action: "allowSession" });
   const r1 = await q1;
-  ok(r1.action === "allowOnce", "remember:true + allowOnce ⇒ 本次放行");
-  ok(g2.isAlwaysAllowed("s_2", "bash") === true, "remember:true ⇒ 该会话该工具已 always-allow");
-  ok(a2.some((e) => e.event === "always_allow_enabled" && e.toolName === "bash"), "开启当刻审计记 always_allow_enabled");
+  ok(r1.action === "allowOnce", "allowSession ⇒ 本次放行");
+  ok(g2.isAlwaysAllowed("s_2", "write", A) === true, "allowSession ⇒ 该会话该文件已记忆");
+  ok(a2.some((e) => e.event === "always_allow_enabled"), "开启当刻审计记 always_allow_enabled");
+  ok(a2.some((e) => e.event === "always_allow_enabled" && String(e.summary).includes("a.md")), "审计里带文件名（可追溯是哪个文件）");
 
   const before2 = p2.length;
-  const r2 = await g2.request({ sessionId: "s_2", sceneId: "repo", toolName: "bash", input: { command: "c" }, cwd });
-  ok(r2.action === "allowOnce", "always-allow 命中 ⇒ 直接放行");
-  ok(p2.length === before2, "always-allow 命中 ⇒ 不再推卡");
+  const r2 = await g2.request({ sessionId: "s_2", sceneId: "work", toolName: "write", input: { path: "a.md", content: "3" }, cwd });
+  ok(r2.action === "allowOnce", "文件记忆命中 ⇒ 直接放行");
+  ok(p2.length === before2, "文件记忆命中 ⇒ 不再推卡");
 
-  // 只对该工具生效：同会话另一工具仍推卡
+  // 只对该文件生效：换文件仍推卡（"安全为主"的核心）
   const before3 = p2.length;
-  g2.request({ sessionId: "s_2", sceneId: "repo", toolName: "write", input: { path: "x.md", content: "y" }, cwd });
-  ok(p2.length === before3 + 1, "always-allow 只对该工具生效（write 仍推卡）");
+  g2.request({ sessionId: "s_2", sceneId: "work", toolName: "write", input: { path: "b.md", content: "y" }, cwd });
+  ok(p2.length === before3 + 1, "文件记忆只对该文件生效（换 b.md 仍推卡）");
 
   // 跨会话不共享
   const before4 = p2.length;
-  g2.request({ sessionId: "s_OTHER", sceneId: "repo", toolName: "bash", input: { command: "d" }, cwd });
-  ok(p2.length === before4 + 1, "always-allow 不跨会话");
+  g2.request({ sessionId: "s_OTHER", sceneId: "work", toolName: "write", input: { path: "a.md", content: "z" }, cwd });
+  ok(p2.length === before4 + 1, "文件记忆不跨会话");
 
-  // 只有 allowOnce 能开启（deny/terminate + remember 无效）
+  // 只有 allowOnce/allowSession 能开启（deny/terminate + remember 无效）
   const { gate: g3 } = makeGate();
-  const p3 = g3.request({ sessionId: "s_3", sceneId: "repo", toolName: "bash", input: { command: "a" }, cwd });
+  const p3 = g3.request({ sessionId: "s_3", sceneId: "work", toolName: "write", input: { path: "a.md", content: "1" }, cwd });
   g3.decide({ approvalId: "a_1", action: "deny", remember: true });
   await p3;
-  ok(g3.isAlwaysAllowed("s_3", "bash") === false, "deny + remember:true ⇒ 不开启");
+  ok(g3.isAlwaysAllowed("s_3", "write", A) === false, "deny + remember:true ⇒ 不开启");
 
   // 会话销毁清空记忆
   const { gate: g4 } = makeGate();
-  const p4 = g4.request({ sessionId: "s_4", sceneId: "repo", toolName: "bash", input: { command: "a" }, cwd });
-  g4.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
+  const p4 = g4.request({ sessionId: "s_4", sceneId: "work", toolName: "write", input: { path: "a.md", content: "1" }, cwd });
+  g4.decide({ approvalId: "a_1", action: "allowSession" });
   await p4;
-  ok(g4.isAlwaysAllowed("s_4", "bash") === true, "开启后记忆存在");
+  ok(g4.isAlwaysAllowed("s_4", "write", A) === true, "开启后记忆存在");
   g4.cancelBySession("s_4");
-  ok(g4.isAlwaysAllowed("s_4", "bash") === false, "会话销毁 ⇒ 清空 always-allow 记忆（仅内存）");
+  ok(g4.isAlwaysAllowed("s_4", "write", A) === false, "会话销毁 ⇒ 清空记忆（仅内存）");
 
-  // 混合批即便 remember:true 也不开启（alwaysAllowEligible=false）
+  // 混合批即便 allowSession 也不开启（alwaysAllowEligible=false）
   const { gate: g5 } = makeGate();
-  g5.request({ sessionId: "s_5", sceneId: "repo", toolName: "write", input: { path: "a.md", content: "x" }, cwd });
-  g5.request({ sessionId: "s_5", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
-  g5.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
-  ok(g5.isAlwaysAllowed("s_5", "write") === false && g5.isAlwaysAllowed("s_5", "bash") === false,
-     "混合批 remember:true ⇒ 不开启（无单一工具可归）");
+  g5.request({ sessionId: "s_5", sceneId: "work", toolName: "write", input: { path: "a.md", content: "x" }, cwd });
+  g5.request({ sessionId: "s_5", sceneId: "work", toolName: "edit", input: { path: "b.md", edits: [{ oldText: "x", newText: "y" }] }, cwd });
+  g5.decide({ approvalId: "a_1", action: "allowSession" });
+  ok(g5.isAlwaysAllowed("s_5", "write", A) === false && g5.isAlwaysAllowed("s_5", "edit", B) === false,
+     "混合批 allowSession ⇒ 不开启（无单一文件可归）");
+
+  // 命令类（bash）没有"文件"可记 ⇒ 永远不开启
+  const { gate: g6 } = makeGate();
+  const p6 = g6.request({ sessionId: "s_6", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
+  g6.decide({ approvalId: "a_1", action: "allowSession" });
+  await p6;
+  ok(g6.isAlwaysAllowed("s_6", "bash", "") === false, "命令类不可开文件记忆（按钮也会置灰）");
 }
 
 /* ================================================================== ⑬ P3-1 T5 */
@@ -719,7 +730,7 @@ console.log("\n[13] T5：已决后旧定时器不得存活 / 不得二次推卡 
         appDir,
         timeoutMs: TIMEOUT_MS, // 5 分钟
       });
-      const p = gate.request({ sessionId: "s_1", sceneId: "repo", toolName: "bash", input: { command: "npm test" }, cwd });
+      const p = gate.request({ sessionId: "s_1", sceneId: "work", toolName: "bash", input: { command: "npm test" }, cwd });
       ok(clock.liveTimeoutTimers() === 1, `${action}：建卡后**审批超时**定时器 == 1`);
 
       gate.decide({ approvalId: "a_1", action });
@@ -759,7 +770,7 @@ console.log("\n[13] T5：已决后旧定时器不得存活 / 不得二次推卡 
         appDir,
         timeoutMs: TIMEOUT_MS,
       });
-      const p = gate.request({ sessionId: "s_ctl", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+      const p = gate.request({ sessionId: "s_ctl", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
       ok(clock.liveTimeoutTimers() === 1, "对照：不决策时审批超时定时器 == 1");
       const fired = clock.advance(TIMEOUT_MS);
       ok(fired >= 1, "对照：推进 5 分钟**确实触发**超时定时器（假时钟有效）");
@@ -788,7 +799,7 @@ console.log("\n[13] T5：已决后旧定时器不得存活 / 不得二次推卡 
       appDir,
       timeoutMs: TIMEOUT_MS,
     });
-    const p = gate.request({ sessionId: "s_guard", sceneId: "repo", toolName: "bash", input: { command: "npm test" }, cwd });
+    const p = gate.request({ sessionId: "s_guard", sceneId: "work", toolName: "bash", input: { command: "npm test" }, cwd });
     // 决策落定（allowOnce）→ 卡已 settle
     gate.decide({ approvalId: "a_1", action: "allowOnce" });
     await p;
@@ -797,7 +808,7 @@ console.log("\n[13] T5：已决后旧定时器不得存活 / 不得二次推卡 
     // 但更真实的是：把 entry 从表里拿不到的路径也走一遍。此处用 _pending 里拿不到 ⇒
     // _onTimeout 走 `!entry` 分支（另一种早退）。为测 `entry.settled` 分支，需保留 entry：
     // 用 request 后**未决**卡 settle 再直接调，构造 settled=true 的 entry。
-    const p2 = gate.request({ sessionId: "s_guard2", sceneId: "repo", toolName: "bash", input: { command: "npm run build" }, cwd });
+    const p2 = gate.request({ sessionId: "s_guard2", sceneId: "work", toolName: "bash", input: { command: "npm run build" }, cwd });
     const entry2 = gate._pending.get("a_1") || [...gate._pending.values()].find((e) => e.sessionId === "s_guard2");
     // 先正常落定卡2
     const id2 = entry2 ? entry2.id : null;
@@ -821,7 +832,7 @@ console.log("\n[13] T5：已决后旧定时器不得存活 / 不得二次推卡 
 
     // ── 负向对照：对**未决**卡直接 _settle ⇔ **必须**有副作用 ──
     // 没有这条，上面两个「零副作用」断言可能是「_settle/_onTimeout 根本没接进生产路径」的假绿。
-    const p3 = gate.request({ sessionId: "s_ctrl", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+    const p3 = gate.request({ sessionId: "s_ctrl", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
     const entry3 = [...gate._pending.values()].find((e) => e.sessionId === "s_ctrl");
     const pushBeforeCtrl = pushed.length;
     const auditBeforeCtrl = audited.length;
@@ -837,7 +848,7 @@ console.log("\n[13] T5：已决后旧定时器不得存活 / 不得二次推卡 
 console.log("\n[14] P2-1：密钥脱敏覆盖「前缀形态」（SECRET_TOKEN= / GITHUB_TOKEN= …）");
 {
   const V = "VALUE-PLACEHOLDER";
-  /** 前缀形态（秦戈 QA 实证的 5 例 + 小写/其它关键字）。 */
+  /** 前缀形态（安全评审 QA 实证的 5 例 + 小写/其它关键字）。 */
   const prefixForms = [
     "SECRET_TOKEN=" + V,
     "GITHUB_TOKEN=" + V,
@@ -875,7 +886,7 @@ console.log("\n[14] P2-1：密钥脱敏覆盖「前缀形态」（SECRET_TOKEN= 
   ok(redactCommandForAudit("GITHUB_TOKEN=" + V + " npm publish", "/nohome").includes("npm publish"),
      "command 审计仍保留命令结构");
 
-  // 值必须**整个**吃掉（不留尾巴）—— 秦戈/team-lead 强调点
+  // 值必须**整个**吃掉（不留尾巴）—— 安全评审/team-lead 强调点
   const tail = redactCommandForAudit("SECRET_TOKEN=abc" + "TAIL" + " cmd", "/nohome");
   ok(!tail.includes("abcTAIL"), "前缀形态值被整个吃掉（不留尾巴）");
 
@@ -939,6 +950,110 @@ console.log("\n[15] sanitizeDetail 密钥脱敏（口径归一：复用 approval
   // ⑤ 幂等：再套一次 redactSecrets 结果不变（同源函数可安全重复调用）
   const once = redactSecrets("GITHUB_TOKEN=" + V);
   ok(redactSecrets(once) === once, "redactSecrets 幂等（重复调用不二次破坏）");
+}
+
+/* ================================================================== ⑯ */
+console.log("\n[16] 四档审批语义（D-11：allowSession / denyWithInstruction）");
+{
+  // ① allowSession：**按文件**记住（同一文件免问，换文件重问，单槽）
+  {
+    const { gate, pushed } = makeGate();
+    const pushCards = () => pushed.filter((c) => c.phase === "push");
+    const req = (p) =>
+      gate.request({ sessionId: "s_r1", sceneId: "work", toolName: "write", input: { path: p, content: "x" }, cwd });
+
+    const p1 = req("a.md");
+    ok(pushCards().length === 1, "allowSession：首次调用弹卡");
+    gate.decide({ approvalId: pushCards()[0].approvalId, action: "allowSession" });
+    const r1 = await p1;
+    ok(r1.action === "allowOnce", "allowSession 对下游等价于放行一次", r1.action);
+
+    const r2 = await req("a.md");
+    ok(r2.action === "allowOnce" && pushCards().length === 1, "同一文件再写 ⇒ 不再弹卡", `cards=${pushCards().length}`);
+
+    // 记忆按**文件**不按工具：同一文件的 edit 也免问
+    const r3 = await gate.request({
+      sessionId: "s_r1",
+      sceneId: "work",
+      toolName: "edit",
+      input: { path: "a.md", edits: [{ oldText: "x", newText: "y" }] },
+      cwd,
+    });
+    ok(r3.action === "allowOnce" && pushCards().length === 1, "同一文件的 edit 也免卡（记忆按文件，不按工具）", `cards=${pushCards().length}`);
+
+    // 换文件 ⇒ 必须重新问（这是"安全为主"的核心）
+    const p4 = req("b.md");
+    ok(pushCards().length === 2, "换文件 ⇒ 重新弹卡", `cards=${pushCards().length}`);
+    gate.decide({ approvalId: pushCards()[1].approvalId, action: "allowSession" });
+    await p4;
+
+    // 单槽：批准 b.md 后，a.md 的记忆已被替换
+    const p5 = req("a.md");
+    ok(pushCards().length === 3, "单槽记忆：批准 b.md 后 a.md 需重新问", `cards=${pushCards().length}`);
+    gate.decide({ approvalId: pushCards()[2].approvalId, action: "terminate" });
+    await p5;
+  }
+
+  // ② denyWithInstruction：拒绝 + 把用户那句话回灌给模型
+  {
+    const { gate, pushed } = makeGate();
+    const p = gate.request({
+      sessionId: "s_r2",
+      sceneId: "work",
+      toolName: "write",
+      input: { path: "a.md", content: "x" },
+      cwd,
+    });
+    gate.decide({
+      approvalId: pushed[0].approvalId,
+      action: "denyWithInstruction",
+      instruction: "改到 docs/ 目录下",
+    });
+    const r = await p;
+    ok(r.action === "deny", "denyWithInstruction 回传 deny");
+    ok(String(r.reason).includes("改到 docs/ 目录下"), "用户说明被原样回灌给模型", String(r.reason).slice(0, 40));
+    ok(!String(r.reason).includes("Do not retry it."), "有说明时不再用默认的「别再试」文案");
+  }
+
+  // ③ 说明为空 ⇒ 回落默认拒绝文案（不把空串发给模型）
+  {
+    const { gate, pushed } = makeGate();
+    const p = gate.request({ sessionId: "s_r3", sceneId: "work", toolName: "write", input: { path: "c.md" }, cwd });
+    gate.decide({ approvalId: pushed[0].approvalId, action: "denyWithInstruction", instruction: "   " });
+    const r = await p;
+    ok(r.reason === DENY_REASON_USER, "说明为空 ⇒ 回落 DENY_REASON_USER");
+  }
+
+  // ④ 说明超长被截断（防把整段文档塞回模型烧 token）
+  {
+    const { gate, pushed } = makeGate();
+    const p = gate.request({ sessionId: "s_r4", sceneId: "work", toolName: "write", input: { path: "d.md" }, cwd });
+    gate.decide({ approvalId: pushed[0].approvalId, action: "denyWithInstruction", instruction: "长".repeat(2000) });
+    const r = await p;
+    ok(String(r.reason).length < 900, "超长说明被截断（≤500 字 + 固定前言）", String(r.reason).length);
+  }
+
+  // ⑤ 旧值 deny 仍可用（IPC 兼容：等价于没有说明的「拒绝并说明」）
+  {
+    const { gate, pushed } = makeGate();
+    const p = gate.request({ sessionId: "s_r5", sceneId: "work", toolName: "write", input: { path: "e.md" }, cwd });
+    gate.decide({ approvalId: pushed[0].approvalId, action: "deny" });
+    const r = await p;
+    ok(r.action === "deny" && r.reason === DENY_REASON_USER, "旧 action=deny 仍按默认拒绝文案");
+  }
+
+  // ⑥ 非法 action 仍被拒
+  {
+    const { gate, pushed } = makeGate();
+    gate.request({ sessionId: "s_r6", sceneId: "work", toolName: "write", input: { path: "f.md" }, cwd });
+    let threw = false;
+    try {
+      gate.decide({ approvalId: pushed[0].approvalId, action: "allowAll" });
+    } catch (err) {
+      threw = /INVALID_ARGUMENT/.test(String(err.message));
+    }
+    ok(threw, "非法 action 抛 INVALID_ARGUMENT");
+  }
 }
 
 /* ------------------------------------------------------------------ 汇总 */

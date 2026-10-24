@@ -345,6 +345,27 @@ console.log("\n[10] open() 找不到 id");
   ok(!/[A-Z]:\\/.test(msg) && !msg.includes(outbox), "错误消息不含绝对路径（脱敏）");
 }
 
+/* ================================================================ [10b] open() 未注入 shellOpener */
+console.log("\n[10b] open() 未注入 shellOpener ⇒ 显式报错（fail-loud）");
+{
+  const svc = makeService(async () => ({ text: JSON.stringify(sampleDoc) }), { shellOpener: null });
+  const card = await svc.generate({ sessionId: "s_1", intent: "未注入打开实现" });
+  let msg = "";
+  let returnedOk = false;
+  try {
+    const r = await svc.open({ outcomeId: card.outcomeId });
+    returnedOk = r?.ok === true;
+  } catch (e) {
+    msg = e.message;
+  }
+  // ⚠ 这条守的是「宁可不打开，也不要假装打开了」：没有实现就必须报错。
+  //   之前的 live 脚本想在真机侧测它，但那样得再造一次模型调用才拿得到 outcomeId，
+  //   所以在纯夹具里覆盖 —— 便宜且照样到位。
+  ok(!returnedOk, "没有实现时**不能**返回 ok");
+  ok(/openPath/.test(msg), `错误消息点明缺的是 openPath 实现（实际：${msg}）`);
+  ok(!/[A-Z]:\\/.test(msg), "错误消息不含绝对路径（脱敏）");
+}
+
 /* ================================================================ [11] list() */
 console.log("\n[11] list()");
 {

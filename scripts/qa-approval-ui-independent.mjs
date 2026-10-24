@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * M4.5 渲染层审批卡 · 秦戈 独立 QA 复验（headless Chrome + CDP）
+ * M4.5 渲染层审批卡 · 安全评审 独立 QA 复验（headless Chrome + CDP）
  * ============================================================================
- * 不求复跑方砚的 51 项，而是**独立构造**下面这些他未覆盖/未实证的点：
+ * 不求复跑前端的 51 项，而是**独立构造**下面这些他未覆盖/未实证的点：
  *   A1 契约字段逐字对齐（protocol.js JSDoc vs 渲染层消费 vs 服务端产出）
  *   A2 mixedKind：卡级 kind ≠ 所有条 kind 时，逐条按 item.kind 渲染（不误用卡级 kind）
  *   A3 alwaysAllowEligible=false ⇒ 不画勾选框
@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HTML_PATH = path.join(ROOT, "src", "renderer", "index.html");
 const PROTOCOL_PATH = path.join(ROOT, "src", "shared", "protocol.js");
-const PORT = 9395; // 与方砚的 9393 错开，避免端口冲突
+const PORT = 9395; // 与前端的 9393 错开，避免端口冲突
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), "minipi-qa-apr-ui-"));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -52,12 +52,12 @@ function finish() {
     console.log(" 失败项：");
     for (const f of failures) console.log("   ✗ " + f);
   }
-  console.log(" 覆盖：DOM 结构/状态机 + 真实点击接线；不覆盖真 IPC 往返 / 真 shell 执行 / 真服务端超时（同方砚声明）。");
+  console.log(" 覆盖：DOM 结构/状态机 + 真实点击接线；不覆盖真 IPC 往返 / 真 shell 执行 / 真服务端超时（同前端声明）。");
   console.log("=".repeat(72));
 }
 
 console.log("=".repeat(72));
-console.log(" M4.5 · 渲染层审批卡 · 秦戈独立 QA 复验（headless Chrome + CDP）");
+console.log(" M4.5 · 渲染层审批卡 · 安全评审独立 QA 复验（headless Chrome + CDP）");
 console.log("=".repeat(72));
 
 /* ================================================================ A0 静态 */
@@ -432,7 +432,7 @@ if (!CHROME) {
       await cancelCard("a_bad");
       await sleep(80);
 
-      // [C2b] actions 非空但**全部非法** ⇒ 回退契约镜像三值（曾为缺陷 P2-UI-1，方砚已修）
+      // [C2b] actions 非空但**全部非法** ⇒ 回退契约镜像三值（曾为缺陷 P2-UI-1，前端已修）
       await inject(mkCard({ approvalId: "a_allbad", actions: ["allow", "evil"] }));
       await sleep(120);
       const btns2 = await evaluate(`[...document.querySelectorAll('#miniBody .approval[data-approval-id="a_allbad"] [data-approval-action]')].map(b=>b.getAttribute('data-approval-action'))`);
@@ -584,7 +584,7 @@ if (!CHROME) {
     }
 
     /* ==================================================== E 未测盲区补充 */
-    group("[E] 补充：方砚未声明的盲区");
+    group("[E] 补充：前端未声明的盲区");
     {
       // E1 update 覆盖时勾选框必须回到未勾（安全默认）
       await cancelAll();

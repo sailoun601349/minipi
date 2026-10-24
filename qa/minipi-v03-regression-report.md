@@ -1,6 +1,6 @@
 # minipi 原型 v0.3 定向回归复验报告
 
-> 测试人：测试工程师 秦戈
+> 测试人：测试工程师 安全评审
 > 被测对象：`D:\SAiProject\minipi\prototype\minipi-prototype.html`（v0.3）
 > 对照基准：本人上一轮报告 `D:\SAiProject\minipi\qa\minipi-qa-report.md`（2026-09-22）
 > 复验性质：**定向回归**——只验修复项是否真修好 + 是否引入新回归，不重跑全量
@@ -270,7 +270,7 @@ qa_v03_menu_open_before_esc.png / qa_v03_menu_after_esc_hover.png
 **测试数据清理**：
 
 - 本轮**未向项目目录（`docs/` / `prototype/` / `qa/`）写入任何数据**——`pretest_` 前缀输入仅存在于浏览器页面内存，未落盘、无残留。
-- 全部脚本、截图、JSON 结果位于系统临时目录 `%TEMP%\minipi_qa\`，并在 `%TEMP%\minipi_qa_prof_qa_*`、`minipi_qa_prof_layout_*`、`minipi_qa_prof_fix_*`、`minipi_qa_prof_rail_*`、`minipi_qa_prof_stale_*`、`minipi_qa_prof_final_*` 下残留临时 Chrome profile（未清理，可由主理人知情后删除；未触及项目目录）。
+- 全部脚本、截图、JSON 结果位于系统临时目录 `%TEMP%\minipi_qa\`，并在 `%TEMP%\minipi_qa_prof_qa_*`、`minipi_qa_prof_layout_*`、`minipi_qa_prof_fix_*`、`minipi_qa_prof_rail_*`、`minipi_qa_prof_stale_*`、`minipi_qa_prof_final_*` 下残留临时 Chrome profile（未清理，可由产品负责人知情后删除；未触及项目目录）。
 - 本轮**未新增、未修改项目内任何文件**；本报告独立存放在临时目录（见下），如需归档到 `qa/` 目录请告知——因任务书要求「`qa/` 不要动」，我未擅自写入。
 
 **项目目录现状（实测，未被本轮改动）**：

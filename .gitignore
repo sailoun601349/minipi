@@ -9,7 +9,11 @@ node_modules/
 
 # ── 构建产物 ──────────────────────────────────────
 dist/
-build/
+# build/ 是图标等构建产物的输出目录（icon.* 由 scripts/build-icon.mjs 现生成，不入库），
+# 但里面的 NSIS 安装器脚本 build/*.nsh 是**第一方源码**，必须入库 —— 否则新克隆的
+# 仓库 `npm run build:win` 缺少 installation 逻辑直接失败。
+build/*
+!build/*.nsh
 out/
 *.exe
 *.dll
@@ -44,16 +48,43 @@ credentials.json
 credentials.yaml
 secrets.*
 
+# ── 内部资产（绝不推送公开仓库）───────────────────
+# .agent-runs/ 是发布过程的证据链（含各轮测试报告 / 实机截图），
+# ui-optimization/ 是另一团队的只读 UI 交付资产（项目决策 D-04）。
+# 两者都是**开发过程资料**，不属于产品源码，公开仓库不收录。
+.agent-runs/
+ui-optimization/
+
 # ── 本机工作区与个人数据 ──────────────────────────
 .workbuddy/
 qa/shots/
+qa/*.png
 qa/_*.txt
 package-lock.json.bak
 
 # ── 系统噪声 ──────────────────────────────────────
+.tmp-*
+*.tmp
 .DS_Store
 Thumbs.db
 desktop.ini
 *.log
 npm-debug.log*
 *.swp
+
+# ── 公开仓库的「只公开该公开的」规则 ──────────────
+# ⚠ 注意：`docs/` 根下的 11 份内部报告（审计 / QA / 路线图）**早已在历史提交里**
+#   （origin/main 上就有，早于本次 1.0 发布）。对**已跟踪**文件写 gitignore 不生效，
+#   强行 untrack 只会造成「历史里有、当前树里没有」的半截状态，反而更难解释。
+#   所以这里只挡**新增**的未跟踪产物，不碰已有跟踪文件。
+docs/*.html
+
+# docs/ 根下的 md 同理：**新增的**内部报告不入库（已在历史里的 11 份仍跟踪，
+# gitignore 对已跟踪文件无效，所以不会造成半截状态）。
+docs/*.md
+!docs/QUICKSTART.md
+!docs/PRIVACY.md
+!docs/RELEASE-NOTES-1.0.0.md
+
+# scripts/out/ 是调试脚本与运行日志的临时输出目录（_inline.mjs / _ls.txt 之类）
+scripts/out/

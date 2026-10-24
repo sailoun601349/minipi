@@ -80,6 +80,17 @@ if (electronPid) {
   bootLog = fs.existsSync(LOG_FILE) ? fs.readFileSync(LOG_FILE, "utf8").slice(-4000) : "";
 }
 
+/* ⚠ 前置条件：minipi 是**单实例**的。如果用户自己正开着 App，本次启动会命中
+   单实例锁并立刻退出（日志里是「已有实例在跑，本次启动退出」）——
+   这不是回归，是设计。这种情况必须判为 **SKIP**，不能判红：
+   否则"开着 App 跑回归"永远是一条红灯，久而久之没人再认真看红。 */
+if (/已有实例在跑/.test(bootLog)) {
+  console.log("\n  SKIP  用户已有一个 minipi 实例在运行（单实例锁生效）");
+  console.log("        本脚本需要独占启动：请先退出 minipi，再跑 `npm run verify:launch-live`。");
+  console.log("        这不是失败 —— 只是前置条件不满足。");
+  process.exit(0);
+}
+
 check(
   `Electron 在启动壳退出后存活 ≥ ${PROBE_MS}ms（detach + GPU sandbox 修复都生效）`,
   stillAlive,

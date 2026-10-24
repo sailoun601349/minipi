@@ -225,6 +225,20 @@ if (!CHROME) {
     ok(snap.mode === 'mini', "当前处于 mini 形态", `mode=${snap.mode}`);
 
     /* ---------------------------------------------------------- B2 */
+    /* 展开「第二轮思考」的折叠体：工具标记卡在思考正文里，落定后默认收起（用户 2026-10-20），
+       不展开就看不见 .toolnote —— 先点开再断言（B3 仍断言「默认收起」）。 */
+    const thinkBodies = await evaluate(`(() => {
+      const full = document.querySelector('#fullTree');
+      if (!full) return { ok: false, reason: 'no fullTree' };
+      const heads = [...full.querySelectorAll('.thinkbox__head')];
+      const head = heads[heads.length - 1];
+      if (!head) return { ok: false, reason: 'no think head' };
+      head.click();
+      return { ok: true, heads: heads.length };
+    })()`);
+    ok(thinkBodies && thinkBodies.ok === true, "展开第二轮思考的折叠体（点标题行）", JSON.stringify(thinkBodies));
+    await sleep(150);
+
     group("[B2] 工具标记折叠成提示卡（不再裸露 <invoke>）");
     const tool = await evaluate(`(() => {
       const full = document.querySelector('#fullTree');
@@ -232,6 +246,7 @@ if (!CHROME) {
       const rows = card ? [...card.querySelectorAll('.toolnote__row')].map((r) => r.textContent) : [];
       return {
         cards: full ? full.querySelectorAll('.toolnote').length : -1,
+        thinkBodies: full ? full.querySelectorAll('.thinkbox__body').length : -1,
         title: card ? (card.querySelector('.toolnote__title') || {}).textContent : null,
         tag: card ? (card.querySelector('.toolnote__tag') || {}).textContent : null,
         rows,
@@ -241,6 +256,7 @@ if (!CHROME) {
         pwned: typeof window.__pwned_tn,
       };
     })()`);
+    ok(tool.thinkBodies >= 1, "点开后思考正文真的进 DOM（折叠是可见的，不是丢了）", `实得 ${tool.thinkBodies}`);
 
     ok(tool.cards === 1, "识别出 1 张工具提示卡", `实得 ${tool.cards}`);
     ok(tool.title && tool.title.includes('cmd'), "提示卡标题带工具名", String(tool.title));
@@ -254,7 +270,19 @@ if (!CHROME) {
     ok(tool.pwned === 'undefined', "onerror 未执行（window.__pwned_tn 未定义）");
 
     /* ---------------------------------------------------------- B3 */
-    group("[B3] 折叠默认值：小窗收起、大窗展开；XSS 仍被挡");
+    /* B2 已手动展开过第二轮思考 → fold 显式 true。这里再点一次收起，验证「用户点过就听用户的」
+       与「默认收起」两条约定：收起后正文不进 DOM，点开后又能看见（B2 已验）。 */
+    await evaluate(`(() => {
+      const full = document.querySelector('#fullTree');
+      if (!full) return false;
+      const heads = [...full.querySelectorAll('.thinkbox__head')];
+      const head = heads[heads.length - 1];
+      if (head) head.click();
+      return true;
+    })()`);
+    await sleep(150);
+
+    group("[B3] 折叠默认值：流式中展开、落定后**两窗都收起**；XSS 仍被挡");
     const plain = await evaluate(`(() => {
       const mini = document.querySelector('#miniBody');
       const full = document.querySelector('#fullTree');
@@ -271,8 +299,8 @@ if (!CHROME) {
     })()`);
     ok(plain.miniThinkBoxes === 2, "小窗里两轮的思考段都在", `实得 ${plain.miniThinkBoxes}`);
     ok(plain.miniThinkBodies === 0, "小窗的思考段默认收起（正文不进 DOM，省得挤爆 360 宽）", `实得 ${plain.miniThinkBodies}`);
-    ok(plain.fullThinkBodies === 2, "大窗的思考段默认展开", `实得 ${plain.fullThinkBodies}`);
-    ok(plain.fullText.includes('第二轮思考'), "大窗里能看到思考正文（散文部分照常显示）");
+    ok(plain.fullThinkBodies === 0, "★ 大窗的思考段落定后也收起（用户 2026-10-20：结束后自动收缩）", `实得 ${plain.fullThinkBodies}`);
+    ok(plain.fullText.includes('第二轮思考') === false, "大窗默认只看结果正文，不看思考正文");
     ok(plain.fullImgs === 0 && plain.miniImgs === 0, "两窗都没有 <img> 注入节点");
     ok(plain.pwned === 'undefined', "onerror 未执行（window.__pwned_tn 未定义）");
   } catch (err) {

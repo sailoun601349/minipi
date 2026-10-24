@@ -2,7 +2,7 @@
 /**
  * QA · 象限 C：渲染层边界（`src/renderer/index.html`）。
  *
- * 本机 Electron GPU 崩、起不来，所以走 headless Chrome + CDP（复用方砚的 harness 思路）：
+ * 本机 Electron GPU 崩、起不来，所以走 headless Chrome + CDP（复用前端的 harness 思路）：
  *   ① **静态审查**：扫内联 sink（innerHTML / outerHTML / insertAdjacentHTML …）是否对模型文本做了转义；
  *   ② **函数单测**：把渲染层内联的 `middleTruncate` / `formatBytes` / `formatClock` /
  *      `escapeHtml` / `sanitizeHref` / `inlineHTML` / `markdownPreview` 喂边界值；

@@ -28,7 +28,7 @@ import { PiSessionHost } from "../src/main/pi/session.js";
 import { OUTBOX_DIR } from "../src/main/settings.js";
 
 const ONLY = (process.argv.find((a) => a.startsWith("--only=")) || "").split("=")[1] || null;
-const SCENE = "desk";
+const SCENE = "chat";
 
 /** 越界目标：放在 outbox **兄弟**目录，确保物理上不在 outbox 内。 */
 const ESCAPE_DIR = path.join(os.homedir(), ".minipi", "sandbox-escape-test");
@@ -137,7 +137,7 @@ async function main() {
       //   (b) 模型自行拒绝/干脆不发 write ⇒ 根本没到 `write`，无 isError、无回灌可看
       // 两者都**不产生 outbox 外文件**（上面的核心断言已证），安全等价。
       // ⚠ 早前版本只认 (a)，导致 (b) 时误报 FAIL（模型行为不确定性，非安全回归）。
-      //   独立 QA（秦戈）复核确认：断言必须对模型行为鲁棒。
+      //   独立 QA（安全评审）复核确认：断言必须对模型行为鲁棒。
       const writeEnds = collected.filter(
         (w) => w.event?.type === "tool_execution_end" && ["write", "edit"].includes(w.event?.toolName),
       );

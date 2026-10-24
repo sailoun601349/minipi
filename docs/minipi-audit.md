@@ -3,7 +3,7 @@
 > **v2 修订说明**：根据 QA 报告（`qa/minipi-qa-report.md`）关闭 P0-1/2/3，修正 C1/C3/C9/C18，补入 N1–N9。v1 中与之冲突的旧表述已直接改写或删除，本文件不再保留 v1 痕迹。
 >
 > 审计人：产品架构师 任析
-> 审计对象：`D:\SAiProject\minipi\docs\minipi-plan.md`（v0.2，全文 435 行，已逐行读取）；交叉验证：`qa/minipi-qa-report.md`（测试工程师 秦戈，2026-09-22）
+> 审计对象：`D:\SAiProject\minipi\docs\minipi-plan.md`（v0.2，全文 435 行，已逐行读取）；交叉验证：`qa/minipi-qa-report.md`（测试工程师 安全评审，2026-09-22）
 > 审计性质：**开工前找问题**，不是评审通过。`minipi-plan.md` 未做任何修改。
 > **证据标注约定**：QA 已实证的写「**已核实**（证据见 QA 报告 X 条）」；本身未验证过、也没有 QA 证据的，一律写「**未验证**」。不把未验证伪装成已核实。
 >

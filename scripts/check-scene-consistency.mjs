@@ -637,7 +637,7 @@ for (const id of pIds) {
 
 group("[12] 全仓库无「旧场景名作为场景名」的残留（src/ + scripts/ + README.md）");
 {
-  const OLD_NAMES = ["speed", "study", "work"];
+  const OLD_NAMES = ["speed", "study", "quick", "note", "desk", "repo"];
   const SCAN_FILES = [];
   // 递归收集 src/
   const collect = (dir) => {
@@ -667,6 +667,13 @@ group("[12] 全仓库无「旧场景名作为场景名」的残留（src/ + scri
     // (a) 注释行：// · * · /* · <!-- · #
     if (/^\/\//.test(line) || /^\*/.test(line) || /^\/\*/.test(line) || /^<!--/.test(line) || /^#/.test(line)) {
       return "注释（历史说明）";
+    }
+    // (a0) 与场景无关的同名字面量（2026-10-21：场景收敛到 chat/work 后，
+    //      `note` 变成常用英文词，必须排除掉这两种非场景用法，否则会误报）
+    //   · 渲染层的**段类型**：`seg.kind === 'note'`
+    //   · 产出格式的**人类可读名**：`buildPopFormatItem('md', 'Markdown 笔记', '', 'note')`
+    if (/seg\.kind\s*===/.test(line) || /buildPopFormatItem/.test(line)) {
+      return "非场景名（段类型 / 格式标识）";
     }
     // (a2) 行内 `// ...` 注释之后的内容 —— 只对「旧名只出现在注释里」的行做排除
     const hashIdx = line.indexOf("//");

@@ -64,7 +64,7 @@ const EVIL = path.join(TMP_ROOT, "evil");
 fs.mkdirSync(EVIL, { recursive: true });
 
 /** 判定一次 `tool_call`，并把 SDK 侧的路径归一也模拟出来做对照。 */
-function judge(inputPath, { sceneId = "desk", toolName = "write", input } = {}) {
+function judge(inputPath, { sceneId = "chat", toolName = "write", input } = {}) {
   const inp = input !== undefined ? input : { path: inputPath, content: "x" };
   return checkWriteTarget({ toolName, input: inp, cwd: OUTBOX, outboxDir: OUTBOX, sceneId });
 }
@@ -274,7 +274,7 @@ group("[A6] 畸形 input：钩子抛异常 = 沙箱静默失效（最严重失�
         input: w.input,
         cwd: OUTBOX,
         outboxDir: OUTBOX,
-        sceneId: "desk",
+        sceneId: "chat",
       });
     } catch (err) {
       threw = true;
@@ -292,7 +292,7 @@ group("[A6] 畸形 input：钩子抛异常 = 沙箱静默失效（最严重失�
     input: { file_path: "../../evil", content: "x" },
     cwd: OUTBOX,
     outboxDir: OUTBOX,
-    sceneId: "desk",
+    sceneId: "chat",
   });
   if (misnamed.blocked === false) {
     finding(
@@ -359,9 +359,9 @@ group("[A8] 大小写混合 + 前缀陷阱组合");
 /* ================================================================== A9 */
 group("[A9] 场景分流硬编码漂移（sandbox.js 内联 OUTBOX_SCENE_IDS vs protocol.js OUTBOX_SCENES）");
 {
-  // sandbox.js 为「零依赖」内联了 ["quick","note","desk"]，没 import protocol.OUTBOX_SCENES。
-  // 若有人在 protocol.js 加第 4 个 outbox 场景，sandbox 会静默失配（该场景不受沙箱约束）。
-  const inline = ["quick", "note", "desk"];
+  // sandbox.js 为「零依赖」内联了 ["chat"]，没 import protocol.OUTBOX_SCENES。
+  // 若有人在 protocol.js 加第 2 个 outbox 场景，sandbox 会静默失配（该场景不受沙箱约束）。
+  const inline = ["chat"];
   const protocol = [...OUTBOX_SCENES];
   const same =
     inline.length === protocol.length && inline.every((v, i) => v === protocol[i]);
@@ -392,7 +392,7 @@ group("[A9] 场景分流硬编码漂移（sandbox.js 内联 OUTBOX_SCENE_IDS vs 
   ok(fakeScene.blocked === true, "未知 sceneId『desk_clone』→ 拒绝（fail-closed，已修 QA-P2-2）");
 
   // 反向确认：已知的豁免场景 repo 仍放行（不能把 repo 也拒了，否则改代码场景全废）
-  const repoScene = judge("../../evil", { sceneId: "repo" });
+  const repoScene = judge("../../evil", { sceneId: "work" });
   ok(repoScene.blocked === false, "已知豁免场景 repo → 放行（刻意走审批闸门，不受沙箱约束）");
 
   // 直接确认：缺 sceneId 时是否仍受约束（防御性）——应该受约束

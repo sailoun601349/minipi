@@ -610,7 +610,13 @@ async function testValidation() {
 
   /* --- 会话 --- */
   await expectReject("createSession 非法 sceneId", `window.minipi.createSession({ sceneId: 'nope' })`, "SCENE_NOT_FOUND");
-  const created = await expectOk("createSession quick", `window.minipi.createSession({ sceneId: 'quick' })`);
+  /* ⚠ 场景名只能是 chat / work（D-15 砍掉 repo，`quick` 从未是合法值）。
+     2026-10-23 修正：这里原本写 `sceneId: 'quick'`，导致 createSession 返回
+     SCENE_NOT_FOUND ⇒ `createdSessionId` 为 null ⇒ 后面 3 条 prompt 用例
+     全部撞上 SESSION_NOT_FOUND（而不是它们各自该验的 INVALID_ARGUMENT），
+     最终 T3 汇总 `allRejected=false` 报 FAIL。
+     那是**脚本过期**，不是产品缺陷 —— 产品拒绝 `quick` 是对的。 */
+  const created = await expectOk("createSession chat", `window.minipi.createSession({ sceneId: 'chat' })`);
   const sessionId = created?.value?.sessionId ?? null;
   t.createdSessionId = sessionId;
 
@@ -715,18 +721,24 @@ async function testSettingsStore() {
     const f = path.join(dir, "a.json");
     const s = new SettingsStore({ filePath: f });
     s.load();
-    check("缺文件 → 生成默认值", fs.existsSync(f) && s.get().sceneId === "quick", `sceneId=${s.get().sceneId}`);
+    /* 默认场景是 `chat`（`protocol.js:323 DEFAULT_SCENE_ID`）。
+       2026-10-23 修正：原断言比的是 `"quick"`（已废弃），必红。 */
+    check("缺文件 → 生成默认值", fs.existsSync(f) && s.get().sceneId === "chat", `sceneId=${s.get().sceneId}`);
   }
 
   // 2) UTF-8 BOM 容错（记事本 / PowerShell -Encoding utf8 会写 BOM）
   {
     const f = path.join(dir, "bom.json");
-    fs.writeFileSync(f, "\uFEFF" + JSON.stringify({ version: 1, sceneId: "repo", noFocusSteal: true }), "utf8");
+    /* ⚠ 这里必须用**合法且非默认**的场景值：`chat` 是默认值，用它就分不清
+       "BOM 剥成功读到了文件" 和 "读取失败回退到默认值"——两者都是 chat。
+       `work` 合法且非默认，读成 work 才能证明文件内容真的被解析了。
+       2026-10-23 修正：原值是 `repo`（D-15 已砍，会被归一成默认 chat ⇒ 断言必红）。 */
+    fs.writeFileSync(f, "\uFEFF" + JSON.stringify({ version: 1, sceneId: "work", noFocusSteal: true }), "utf8");
     const s = new SettingsStore({ filePath: f });
     s.load();
     check(
       "UTF-8 BOM 容错",
-      s.get().sceneId === "repo" && s.get().noFocusSteal === true,
+      s.get().sceneId === "work" && s.get().noFocusSteal === true,
       `sceneId=${s.get().sceneId} · 警告=${s.warnings.length}`,
     );
   }
@@ -737,15 +749,19 @@ async function testSettingsStore() {
     fs.writeFileSync(f, "{ this is not json", "utf8");
     const s = new SettingsStore({ filePath: f });
     s.load();
-    check("坏 JSON → 回退默认 + .bad", fs.existsSync(`${f}.bad`) && s.get().sceneId === "quick", `备份存在=${fs.existsSync(`${f}.bad`)}`);
+    /* 同上：坏 JSON 回退到**默认场景** `chat`，不是已废弃的 `quick`。 */
+    check("坏 JSON → 回退默认 + .bad", fs.existsSync(`${f}.bad`) && s.get().sceneId === "chat", `备份存在=${fs.existsSync(`${f}.bad`)}`);
   }
 
   // 4) 白名单：未知键丢弃、已知键生效
   {
     const s = new SettingsStore({ filePath: path.join(dir, "c.json") });
     s.load();
-    const next = s.set({ totallyUnknownKey: 1, sceneId: "desk" });
-    check("未知键丢弃 / 已知键生效", !("totallyUnknownKey" in next) && next.sceneId === "desk", `顶层键=${Object.keys(next).join(",")}`);
+    /* ⚠ 已知键要写**合法值**才有意义：`desk` 不是合法场景（只有 chat/work），
+       它会被当成非法值归一掉 ⇒ 就分不清"键被接受"和"值被清洗"。
+       2026-10-23 修正：原值 `desk` 换成合法的 `work`（非默认，能证明值真的落进去了）。 */
+    const next = s.set({ totallyUnknownKey: 1, sceneId: "work" });
+    check("未知键丢弃 / 已知键生效", !("totallyUnknownKey" in next) && next.sceneId === "work", `顶层键=${Object.keys(next).join(",")}`);
   }
 
   // 5) 越界坐标（±999999）被拒

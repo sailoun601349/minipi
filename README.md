@@ -1,10 +1,75 @@
 # minipi
 
-常驻桌面的 Pi 悬浮球（Electron 宿主层 + Pi SDK 接线）。
+常驻桌面的 AI 悬浮球（Electron 宿主层 + Pi SDK 接线）。
 
-本期交付范围：**M0（能跑起来、能流式说话、未聚焦不停画）+ M1 核心（三态变形 / 全局热键 / 场景 / 设置持久化）**。
+本期交付范围：**1.0 发布版**（M0 能跑能流式 + M1 三态变形/热键/场景 + B1-3 会话自建 + M4 审批闸门 + M5 产出链路）。
 
-> 本仓库当前状态：**宿主层已完成并可独立验证**；渲染层（`src/renderer/`）由前端并行交付，宿主层在它到位前会加载 `scripts/probe/stub.html` 兜底探针页，功能与自测不受影响。
+> 客户向文档：[`docs/QUICKSTART.md`](./docs/QUICKSTART.md)（安装 / 首次配置模型 / 热键 / 数据位置 / 报障）
+> 与 [`docs/PRIVACY.md`](./docs/PRIVACY.md)（数据留在本机 / 何时联网 / 密钥怎么处理）。
+> 版本变更见 [`docs/RELEASE-NOTES-1.0.0.md`](./docs/RELEASE-NOTES-1.0.0.md)。
+
+---
+
+## 目录
+
+- [0. 打一个给客户的安装包](#0-打一个给客户的安装包)
+  - [0.1 安装目录：选哪个盘就装到哪](#01-安装目录选哪个盘就装到哪)
+- [1. 快速开始](#1-快速开始)
+- [2. 目录结构](#2-目录结构)
+- [3. 架构：进程边界与 IPC](#3-架构进程边界与-ipc)
+- [4. 冻结契约：`window.minipi`](#4-冻结契约windowminipi)
+- [5. 关键实现说明](#5-关键实现说明)
+  - [5.10 系统托盘（常驻托盘图标）](#510-系统托盘常驻托盘图标)
+- [6. 安全设计（四个必查项）](#6-安全设计四个必查项)
+- [7. 数据与配置](#7-数据与配置)
+- [8. 本机环境坑（踩过的，别重复踩）](#8-本机环境坑踩过的别重复踩)
+- [9. 实测记录](#9-实测记录)
+- [10. 与方案的偏离](#10-与方案的偏离)
+- [11. 未完成项 / 未验证项](#11-未完成项--未验证项)
+- [12. 开源许可](#12-开源许可)
+
+---
+
+## 0. 打一个给客户的安装包
+
+```bash
+node scripts/build-icon.mjs      # 生成 build/icon.png + icon.ico + icon.icns（纯 Node，无依赖）
+npm run build:win                # → dist/minipi Setup 1.0.0.exe
+node scripts/verify-packaged.mjs # 验证 dist/win-unpacked 能不能真起来（存活 + 窗口句柄）
+```
+
+`npm run build:dir` 只解包不打安装包（冒烟更快）。`npm run build:mac` 出 dmg。
+
+三条打包相关的硬约束（都踩过，别改）：
+
+1. **`electronDist: node_modules/electron/dist`** —— 必须复用本地已解包的 Electron。
+   不设它，electron-builder 会去 GitHub 下载，本机会撞 `502 Bad Gateway` 直接卡死。
+2. **图标必须给 `.ico` / `.icns`，不能只给 `.png`** —— 只给 png 会让 electron-builder
+   spawn 它的 `icon-tool.js` 去转，那个子进程在本机会 **OOM**（`Zone Allocation failed`），
+   报错藏在 `updating asar integrity executable resource` 后面，极易误判。
+   现在三件套由 `build-icon.mjs` 自产（每个尺寸都是真渲染，不是缩图）。
+3. **不要加 `--disable-gpu`** —— 透明窗依赖 DWM；`src/main/index.js` 只加
+   `--disable-gpu-sandbox`（保留硬件加速），打包后自动生效。
+
+打包前 `build-release.mjs` 会跑 8 项前置校验（含图标结构逐字节校验），任一致命项失败
+就中止，**不产出坏包**。
+
+### 0.1 安装目录：选哪个盘就装到哪
+
+Windows 安装向导里会给你「选择安装位置」的机会（`oneClick: false`）。选任意目录都行 ——
+**minipi 会把程序装进该目录下的 `minipi` 子目录**，而不是直接铺在你选的目录根上：
+
+| 你在向导里选 | 实际安装到 |
+| --- | --- |
+| `E:\` | `E:\minipi` |
+| `E:\work\` | `E:\work\minipi` |
+| 不选（默认） | `%LOCALAPPDATA%\Programs\minipi`（最后一段已是 `minipi`，不再追加） |
+
+这样做是为了避免把 `minipi.exe`、`resources\`、`locales\` 等几十个文件直接散落在整块盘根上
+（卸载不干净、排查难找），属于**事故级体验问题**。实现见 `electron-builder.yml` 的
+`nsis.include` 引入的 [`build/installer.nsh`](./build/installer.nsh)（`onVerifyInstDir` 回调）；
+脚本里对「盘符根 / 以分隔符结尾 / 已经是 minipi」三种形态分别处理，防止用户在地址框里
+逐字输入时被反复追加 `minipi`。
 
 ---
 
@@ -59,17 +124,23 @@ npm run launch       # 只跑启动壳，不经过 .cmd
 启动后：
 
 - 桌面右下侧出现一个 **48×48 的悬浮球**（默认形态 `ball`）。
-- `Alt+Space` —— 唤出 / 收起（`ball` ↔ `mini`；`full` 时收到 `mini`）。
+- **左键**点球 —— 打开小窗（`ball` → `mini`）。
+- **右键**点球 —— 就地弹出菜单：**外观（跟随系统 / 浅色 / 深色）· 设置 · 关闭悬浮窗 · 退出 minipi**。
+  右键**不会**再把聊天窗撑开：窗口只在菜单展开的瞬间临时放大，收起即还原 48×48。
+- `Alt+Space` —— 唤出 / 收起（`ball` ↔ `mini`；`full` 时收到 `mini`）。**关闭悬浮窗后也用它唤回**。
 - `Alt+Shift+Space` —— 抓当前选中文字（合成 `Ctrl+C` → 读剪贴板 → **还原原剪贴板**），并切到 `mini`。
+- **外观**是全局设置（`~/.minipi/settings.json` 的 `theme`）：球与窗口共用同一套浅/深色令牌，
+  切换即时生效（`system` 跟随操作系统；球另有径向渐变 / 阴影 / π 负形三组专属令牌）。
 
 ### 自测与实测
 
 ```bash
-npm run verify:all      # ★ 串行回归全量（21 个脚本 / 1100+ 项断言），含真窗口自测
-npm run selftest        # 只跑宿主层自测（T0–T4），需要可用的 GPU
-npm run selftest:soft   # 同上，但带 --disable-gpu：给沙箱 / 无头 / CI 环境用
-npm run verify:stream   # 真实调用一次模型，验证逐字流式（会消耗模型额度）
-npm run verify:electron # 校验 electron 二进制是否真的下来了
+npm run verify:all        # ★ 串行回归全量（35 个脚本：真窗口自测 + headless Chrome 渲染 + 纯 Node）
+npm run verify:loop-live  # ★ 基础闭环真机端到端：真提问 → 真回答 → 真导出 md/docx（消耗额度）
+npm run selftest          # 只跑宿主层自测（T0–T4），需要可用的 GPU
+npm run selftest:soft     # 同上，但带 --disable-gpu：给沙箱 / 无头 / CI 环境用
+npm run verify:stream     # 真实调用一次模型，验证逐字流式（会消耗模型额度）
+npm run verify:electron   # 校验 electron 二进制是否真的下来了
 ```
 
 实测产物落在 `scripts/out/`：`selftest.json`（机器可读）、`selftest.txt`（人读）、`verify-stream.json`。
@@ -99,32 +170,68 @@ npm run verify:electron # 校验 electron 二进制是否真的下来了
 
 ```
 minipi/
-├── package.json               # 单包，纯 ESM；scripts: start / selftest / selftest:soft / verify:stream / verify:electron
-├── .npmrc                     # electron_mirror（npmmirror）
-├── README.md
+├── package.json / package-lock.json   # 单包，纯 ESM；脚本见 `package.json`
+├── .npmrc                             # electron_mirror（npmmirror）
+├── electron-builder.yml               # 打包配置（Windows nsis / macOS dmg）
+├── build/                             # 图标产物（build-icon.mjs 现生成）+ NSIS 脚本 installer.nsh
+├── README.md · LICENSE (Apache-2.0) · minipi.cmd（Windows 双击入口）
 ├── src/
 │   ├── shared/
-│   │   └── protocol.js        # ★ 主↔渲染的唯一契约：通道名 / 错误码 / 尺寸 / 场景 / 设置 / 校验小工具
+│   │   └── protocol.js                # ★ 主↔渲染的唯一契约：通道名 / 错误码 / 尺寸 / 场景 / 设置
 │   ├── main/
-│   │   ├── index.js           # 入口：单实例锁、启动顺序、IPC 路由 registerIpc()、热键行为、事件重放
-│   │   ├── window.js          # 窗口层：一个 BrowserWindow 三态变形、位置记忆、推送保护
-│   │   ├── hotkeys.js         # 全局热键 + 三级降级抓选区（含剪贴板快照/恢复）
-│   │   ├── settings.js        # ~/.minipi/settings.json：白名单归一化 + 原子写盘 + 坏文件兜底
+│   │   ├── index.js                   # 入口：单实例锁、启动顺序、IPC 路由、热键行为、事件重放
+│   │   ├── window.js                  # 窗口层：单 BrowserWindow 三态变形、位置记忆、推送保护
+│   │   ├── hotkeys.js                 # 全局热键 + 三级降级抓选区（含剪贴板快照/恢复）
+│   │   ├── settings.js                # ~/.minipi/settings.json：白名单归一化 + 原子写盘 + 坏文件兜底
+│   │   ├── logger.js                  # 主进程文件日志（落盘 / 轮转 / 绝不抛错）
+│   │   ├── session-store.js           # 会话索引 / 对账 / 回收站
+│   │   ├── versions.js                # 「关于」里的运行时版本来源
+│   │   ├── tray.js                    # 系统托盘（常驻 / 单击切换 / 右键菜单，见 §5.10）
 │   │   └── pi/
-│   │       ├── session.js     # ★ 唯一 import Pi SDK 业务 API 的地方：会话宿主 + 事件 seq 包装 + 闸门预留位
-│   │       └── scenes.js      # 三场景落地策略（cwd / 工具白名单 / 会话是否落盘）
-│   └── preload/
-│       └── index.js           # contextBridge 暴露 window.minipi（纯透传）
+│   │       ├── session.js             # ★ 唯一 import Pi SDK 业务 API 的地方
+│   │       ├── scenes.js              # 三场景落地策略（cwd / 工具白名单 / 会话是否落盘）
+│   │       ├── approval.js            # 审批闸门（M4）
+│   │       ├── sandbox.js             # outbox 写路径沙箱
+│   │       ├── outcome/               # 结构化 JSON → md/docx 产出链路（M5）
+│   │       └── web/                   # 联网能力（DeepSeek Search / Fetch）
+│   ├── preload/
+│   │   └── index.js                   # contextBridge 暴露 window.minipi（纯透传）
+│   ├── assets/
+│   │   └── tray.ico · trayTemplate.png # 托盘图标（随 asar 打包，见 tray.js）
+│   └── renderer/
+│       └── index.html                 # 渲染层（HTML + 原生 JS，零构建）
 ├── scripts/
-│   ├── start.mjs              # 启动器：清 ELECTRON_RUN_AS_NODE 后再拉起 electron
-│   ├── check-electron.mjs     # 校验 electron.exe 存在，缺失则带镜像重跑 install.js
-│   ├── verify-stream.mjs      # 真实模型流式实测（跑生产代码 pi/session.js）
-│   ├── selftest/main.mjs      # T0–T4 宿主层自测
-│   └── probe/stub.html        # 兜底探针页（渲染层未到位时代替 src/renderer/index.html）
-└── scripts/out/               # 自测与实测产物
+│   ├── start.mjs / launch.mjs         # 启动器（清 ELECTRON_RUN_AS_NODE 后拉起 electron）
+│   ├── build-*.mjs                    # 图标 / 打包（build-icon / build-release）
+│   ├── verify-*.mjs / qa-*.mjs        # 门禁与 QA（见 §1 自测与实测、§9 实测记录）
+│   ├── selftest/main.mjs              # T0–T4 宿主层自测
+│   └── probe/stub.html                # 兜底探针页（供自测自建探针窗加载）
+├── docs/                              # 客户文档（QUICKSTART / PRIVACY / RELEASE-NOTES）+ 设计/QA 记录 + UI 规范
+├── qa/                                # QA 报告（*.md 入库；截图在 qa/shots/，不入库）
+├── prototype/                         # 早期原型 minipi-prototype.html（历史产物，见 §10）
+├── spike/                             # 技术验证工程（只留源码与 RESULT.md）
+├── vendor/                            # Pi SDK 源码快照（不入库）
+└── node_modules/ · dist/              # 依赖 / 构建产物（不入库）
 ```
 
-**`src/renderer/` 不属于宿主层**——本仓库宿主层不创建、不修改该目录。
+### 2.1 哪些入库、哪些不入库
+
+`.gitignore` 的取舍原则：**只收录「第一方源码 + 文档 + 验证脚本」**。
+
+| 路径 | 入库 | 理由 |
+| --- | --- | --- |
+| `src/` `scripts/` `docs/` `qa/*.md` `prototype/` | ✅ | 第一方源码、门禁脚本、文档与 QA 报告 |
+| `electron-builder.yml`、`build/*.nsh` | ✅ | 打包配置与第一方安装器脚本（图标 `build/icon.*` 由 `build-icon.mjs` 现生成，不入库） |
+| `node_modules/`、`dist/` | ❌ | 依赖与构建产物，`npm install` / `npm run build` 可随时重生成 |
+| `spike/*/{node_modules,out,dist}` | ❌ | 技术验证的一次性依赖与产物；spike 已结题，只留源码与 `RESULT*.md` |
+| `vendor/` | ❌ | 上游 Pi SDK 源码快照（MIT, © Mario Zechner），开发期核对用；运行时走 npm 包（约 59MB） |
+| `qa/shots/`、`qa/*.png` | ❌ | 过程截图，体积大且非源码 |
+| `.agent-runs/` | ❌ | 发布过程证据链（各轮测试报告 / 实机截图），**内部资料**，不公开 |
+| `ui-optimization/` | ❌ | 另一团队的只读 UI 交付资产（项目决策 D-04：只读 / 不改 / 不提交） |
+| `.workbuddy/`、`.env*`、`auth.json`、`credentials*`、`*.key`/`*.pem` | ❌ | 本机工作区与密钥，纵深防御（minipi 本身不存 key，见 §12） |
+
+> `src/renderer/` 是**本仓库的一部分**（渲染层 HTML + 原生 JS，零构建），随源码一起入库；
+> 宿主层与渲染层之间只通过 `src/shared/protocol.js` 定义的 `window.minipi` 契约通信。
 
 ---
 
@@ -399,6 +506,129 @@ UI 里没填时会尝试从该提供方现有模型推断，推断不出来就�
 但含义完全不同）。硬超时 15s + 响应体 2MB 上限；密钥**只进请求头**，绝不进返回值 / 错误文案 / 日志
 （`verify:providers` 有专项断言）。
 
+### 5.8 基础业务闭环：提问 → 回答 → 导出 md/docx
+
+这是产品的最小可用链路，分两段验证，**两段都过才算闭环成立**：
+
+| 段 | 验证脚本 | 覆盖 |
+|---|---|---|
+| 界面 → 宿主 | `qa:business-loop`（47 项，headless + mock） | 两态都能提问、参数正确、回答渲染、草稿互通、导出格式正确、卡片按钮调到宿主 |
+| 宿主 → 真模型 / 真文件 | `verify:loop-live`（23 项，真机） | 真提问拿到逐字流与非空回答；md/docx **真落盘**；docx 是真 OOXML |
+
+**① 输入区：小窗、大窗都能提问。**
+
+这里修过一个实质缺陷：`src/renderer/index.html` 里原来是
+
+```js
+const inputEl = $('#miniInput');   // ← 单例
+```
+
+而**大窗里根本没有第二个输入框** —— 结果是「大窗只能看、不能问」，用户必须先收起成小窗才能打字。
+现在改成一套 composer：
+
+- 两态各一个 `textarea.js-composer`（`#miniInput` / `#fullInput`）；
+- `activeComposer()` 按**当前形态**取输入框，`send()` 从它取值；
+- 发送 / 中断按钮用 `.js-send` / `.js-abort` **class 批量绑**与**状态同步**
+  （`syncAbortButtons()`）—— 避免「只绑了小窗那个」这类只在另一态才暴露的问题；
+- `syncComposerDraft()` 让两态**草稿互通**：小窗打一半展开成大窗，字不丢。
+
+**② 导出：`产出` → 选格式 → 生成 → 卡片上的「打开 / 另存为」。**
+
+- 入口：小窗输入区「产出」、大窗侧栏「整理本轮为文档」、大窗输入区「产出」（三处等价）。
+- 对话框可选 **Word (.docx)** 或 **Markdown (.md)**，并填一句整理意图；
+- 走后端 `generateOutcome` → `OutcomeService`（真实模型 → 结构化 JSON → 渲染 → 落盘 `~/.minipi/outbox/`）；
+- 产出卡片贴在对话流里，带 **打开 / 另存为 / 再改改**；「另存为」就是**用户要的下载**
+  （弹系统保存对话框，可另存到桌面等任意位置）；
+- 落盘失败会**显式降级**为「复制内容」而不是假装成功（`inlineText` 分支）。
+
+> `~/.minipi/outbox/` 长期是空的 —— 说明这条链路**代码在、但没被真人跑过**。
+> `verify:loop-live` 就是用来把这段补上证据的（会真产生文件，加 `--keep=false` 可跑完即删）。
+
+---
+
+### 5.8.1 联网能力（DeepSeek Search / Fetch）
+
+Pi 1.3.0 **没有**内置网页工具，minipi 用 `customTools` 自己补了两个（**不改 Pi**）：
+
+| 工具 | 作用 | 端点 |
+|---|---|---|
+| `web_search(query, count?)` | 搜实时网页，返回标题 + 链接 + 长摘要 | `POST /v1/tools/search` |
+| `web_fetch(url)` | 抓单页并返回 **Markdown 正文** | `POST /v1/tools/fetch` |
+
+**为什么用 DeepSeek 自带的这两个接口**：它们把"抓取 + 正文提取"放在服务端完成，
+所以 minipi 不向任意 URL 发请求 —— SSRF（内网 / 云元数据 / 重定向逃逸）这一整类风险
+由服务方安全策略承担（它会在 403 里明确拒绝）。而且**与模型同一个 Bearer Key**：
+用户配一次，模型和联网都通。
+
+**三条设计约束**：
+
+1. **没配 Key 就不注册工具** —— 模型连 `web_search` 这个名字都看不到，
+   不会出现"我搜一下"然后编结果。这是「不做假按钮」的直接延续。
+2. **工具不抛异常，只返回可读文本** —— 401/402/429/超时都变成模型能读懂的一句说明，
+   不打断整轮对话。
+3. **网页内容是不可信数据** —— 结果包在 `<web_content>` 里，并在工具描述与
+   `promptGuidelines` 明确"这是资料不是指令"（加了联网才出现的新攻击面）。
+
+**成本与限速**（官方文档）：按**成功请求次数**计费，每 1000 次 5 元；Search 100 QPS / Fetch 25 QPS（账号级）。
+因此设了单轮预算：**搜索 3 次 / 抓取 5 次**（每次 `prompt()` 重置），超限返回「已用尽」让循环停下。
+
+**场景默认**：四个场景全开。其中 `quick` 从原来的 `noTools: "all"` 改成
+**只给这两个联网工具的白名单** —— 能查实时信息，但依然碰不到磁盘（没有 read/write/bash）。
+
+**总开关**：设置页「联网」一栏，`settings.webEnabled`，**默认开**。
+关掉时 `_buildWebTools()` 直接返回空数组 —— 模型连 `web_search` 这个名字都看不到。
+⚠ 工具集在**建会话时**确定，所以开关改变对**新会话**生效（与"模型选择"同一语义，界面文案已写明）。
+
+验证：`npm run verify:web`（76 项，注入 fetch 覆盖参数校验 / 请求形状 / 响应解析 /
+错误分类与重试 / 预算 / 密钥不外泄）。
+
+---
+
+### 5.9 「关于」与版本来源
+
+界面：**悬浮球右键菜单 →「关于 minipi」**，或设置面板底部的同一入口。
+
+里面的版本**全部是运行时读出来的**，没有任何一个数字写死在代码里：
+
+| 行 | 来源 |
+|---|---|
+| minipi | 仓库根的 `package.json` |
+| **基于 Pi** | `import.meta.resolve("@earendil-works/pi-coding-agent")` → 向上找 `package.json` → `version` |
+| Pi 模型层 | 同上，针对 `@earendil-works/pi-ai` |
+| Electron / Chromium / Node | `process.versions` |
+
+为什么这么做：写死版本号的文案**一定会过期**——升级依赖忘了改，界面就开始说谎。
+现在 `verify:theme-live` 里有一条断言把它钉住：
+
+```text
+★ 探测值 == 实际安装版本（不会说谎） · 1.3.0 vs 1.3.0
+★ Pi 与模型层同一发布线 · 1.3.0 / 1.3.0
+```
+
+当前基线：**Pi 1.3.0**（2026-10-20 由 0.87.0 升级并全量回归通过）。
+`package.json` 里用 `--save-exact` 锁死精确版本，避免 `^` 悄悄漂移。
+
+---
+
+### 5.10 系统托盘（常驻托盘图标）
+
+> **解决什么问题**：minipi 是常驻桌面的悬浮球，用户把「总是置顶」关掉后，窗口很容易被
+> 其他应用盖住，既找不到入口、也退不出。托盘图标是**永远够得着的兜底入口**。
+
+行为（实现见 `src/main/tray.js`）：
+
+- **常驻托盘图标**：应用启动后一直在任务栏右下角（通知区），不随主窗口收起而消失。
+- **单击图标** → 显示 / 收起主窗口（切换）。
+- **右键菜单**含五项：
+  - 「显示 / 收起」
+  - 「打开小窗」
+  - 「模型设置」
+  - 「关于」
+  - 「退出 minipi」（真正退出应用，不只是收起窗口）
+
+> 语义上「收起」与「退出」严格区分：收起只是隐藏窗口、进程仍在跑；只有在托盘菜单点
+> 「退出 minipi」才结束进程。避免用户把「收起」误当「退出」而困惑「它还在后台跑吗」。
+
 ---
 
 ## 6. 安全设计（四个必查项）
@@ -425,11 +655,23 @@ UI 里没填时会尝试从该提供方现有模型推断，推断不出来就�
 
 ```
 ~/.minipi/
-├── settings.json      # 设置（唯一持久化的用户数据）
-├── outbox/            # ★ 产出抽屉：quick / note / desk 的 cwd，用户不感知
-├── repo/              # repo 场景 cwd（v0.1 占位）
-└── logs/              # 预留目录；v0.1 事件只落内存，不落盘
+├── settings.json        # 设置
+├── credentials.json     # API Key（0600；只写不读，界面不回显、不进日志）
+├── providers.json       # 自定义提供方定义（apiKey/key/token 这类字段被显式拒绝）
+├── sessions/            # 会话正文 JSONL + index.json 元数据索引
+├── trash/               # 删除的会话正文（文件层面回收站，v1 无恢复入口）
+├── outbox/              # ★ 产出抽屉：所有随手产出都落在这里，用户不感知
+├── approvals-audit.log  # 审批审计（NDJSON，已脱敏）
+└── logs/
+    ├── main.log         # 主进程日志（src/main/logger.js 写，超 1MB 轮转 .old）
+    └── launcher.log     # 启动器日志（仅 scripts/launch.mjs 启动时有）
 ```
+
+> **`main.log` 是发布必备，不是调试便利。**
+> 打包后没有启动器、Windows GUI 子系统程序没有控制台，`console.log` 会被系统直接丢弃 ——
+> 也就是说如果主进程只 `console` 不落盘，**客户版永远没有任何日志**，报「双击没反应」时零信息。
+> 所以 `src/main/index.js` 用的是 `createLogger()`（文件日志），不是 `console`。
+> 改回 `console` 等于把可支持性清零。
 
 > **`outbox` 是本产品的核心概念**：用户**永远不选目录**，所有随手产出都落在这里。
 > 用户不该感知它的存在，只需要在产出卡片上点「打开 / 另存为」。
@@ -442,7 +684,7 @@ UI 里没填时会尝试从该提供方现有模型推断，推断不出来就�
 ```json
 {
   "version": 1,
-  "sceneId": "quick",
+  "sceneId": "chat",
   "noFocusSteal": false,
   "window": {
     "state": "ball",
@@ -561,9 +803,9 @@ UI 里没填时会尝试从该提供方现有模型推断，推断不出来就�
 
 ## 10. 与方案的偏离
 
-1. **`ball` 窗口就是 48×48**，没有采用「窗口 96×96、视觉球内缩」的做法。理由：本机 `dpr = 1.5`，48 DIP ≈ 48 CSS px ≈ 72 物理像素，已满足 44px 最小命中区建议；若把窗口放大到 96×96，会强迫渲染层在内缩容器里画球，等于在并行开发期**偷偷改视觉契约**。
+1. **`ball` 窗口就是 48×48**，没有采用「窗口 96×96、视觉球内缩」的做法。理由：本机 `dpr = 1.5`，48 DIP ≈ 48 CSS px ≈ 72 物理像素，已满足 44px 最小命中区建议；若把窗口放大到 96×96，会强迫渲染层在内缩容器里画球，等于**擅自改视觉契约**。
 2. **多了一个 `selftest:soft` 脚本**（`--disable-gpu`）。正常 `npm start` / `npm run selftest` **不动渲染后端**；这只是给沙箱 / 无头环境留的一条可复现验证路径。
-3. **多了一个兜底探针页** `scripts/probe/stub.html`。渲染层未到位时 `window.js` 会加载它并在日志里明确告警；`src/renderer/index.html` 一旦出现就自动切回，不需要改代码。
+3. **保留一个兜底探针页** `scripts/probe/stub.html`。当 `src/renderer/index.html` 缺失时 `window.js` 会加载它并在日志里明确告警；它也是自测自建探针窗（T2）加载的页面。
 4. **`repo` 场景 cwd 用 `~/.minipi/repo` 占位**：v0.1 契约里 `createSession` 没有 `cwd` 参数，「显式选择工作区」等契约扩展后再替换。
 5. **IPC 用「可读错误字符串」而不是 HTTP 状态码**：进程间通信没有 HTTP 层，沿用契约里 `"<CODE>: <说明>"` 的约定，`INVALID_ARGUMENT` 对应 400、`*_NOT_FOUND` 对应 404、非主窗口调用对应 403 的语义。
 
@@ -571,21 +813,31 @@ UI 里没填时会尝试从该提供方现有模型推断，推断不出来就�
 
 ## 11. 未完成项 / 未验证项
 
+> 1.0 发布版的功能范围已全部落地；下面分「明确不做（取舍）」与「需人工真机过一遍（未验证）」两类。
+> 「未做」不等于「坏」——每条都写了取舍理由，避免下一位维护者把它当成遗漏重新捡起来。
+
 **明确不做（本期取舍，不是遗漏）**
 
-- **产出链路（M5）**：`outbox` 沙箱已就位，但「结构化 JSON → docx 落盘 → 产出卡片」尚未实现。
-- **抓选区降级链 ③**（UI Automation `TextPattern` 取选中文字）：只做了 ①②。
-- **事件落盘**：`~/.minipi/logs/` 只建目录，事件只在内存环形缓冲里。
-- **多会话管理**：每次 `createSession` 新建一个会话，契约里没有「列出 / 切换 / 恢复会话」的接口。
+- **自动更新**：**未做**。理由是没有可用的发布 feed —— 现在只产本地安装包，不做增量分发。
+  但 `npm run build:win` 已经顺带产出 `latest.yml` + `*.blockmap`（electron-updater 的标准元数据），
+  将来把 `dist/` 挂到任意静态分发地址、接上 `electron-updater` 即可，打包链路不用重做。
+- **代码签名**：**未做**（没有代码签名证书）。后果是 Windows SmartScreen / macOS Gatekeeper 首次打开会拦；
+  绕过方法（Windows「更多信息 → 仍要运行」、macOS 右键「打开」）已写进
+  [`docs/QUICKSTART.md`](./docs/QUICKSTART.md)。拿到证书后只需在 `electron-builder.yml` 补证书配置。
+- **抓选区降级链 ③**（UI Automation `TextPattern` 取选中文字）：只做了 ①②，③ 留作后续。
 
-**未验证 / 需要你在真机确认**
+**未验证 / 需要人工在真机上过一遍**
 
+- **真机安装向导**：`npm run build:win` 能出安装包，但「选安装目录 → 实际装到 `<所选目录>\minipi`（§0.1）→ 卸载残留」
+  这条完整链路**需要人工在一台干净机器上走一遍**。
+- **GUI 观感**：透明窗 / DWM 合成 / 深浅双主题在真实桌面上的观感（发虚、边缘锯齿、对比度）
+  **需要人工目视确认** —— 自动化门禁只能验尺寸与令牌，验不了「好看」。
 - **`Alt+Space` / `Alt+Shift+Space` 的真实按键**：自测只验证了「注册成功」，没有真的按下去——`globalShortcut` 在无头 / 沙箱会话里不会收到真实键盘事件。**请在交互式桌面上手动按一次确认**。
 - **抓选区的端到端效果**：合成 `Ctrl+C` 依赖 `powershell.exe` + `WScript.Shell.SendKeys`，对提权目标进程会被 UIPI 挡住（→ 降级 ②）。**未在真实 App（浏览器 / 编辑器）里端到端验证过**。
-- **审批闸门的真机弹卡**：195 项纯 Node 验证（`npm run verify:approval`）+ 59 项 headless Chrome 渲染验证（`npm run verify:approval-ui`）全绿，但本机 Electron 启动即 GPU 崩（`exit_code=-1073741819`，`--disable-gpu` 无效），**真实窗口里的弹卡与三按钮交互未跑过**。
-- **渲染层 UI**：由前端并行交付；宿主层在它到位前跑的是兜底探针页，**没有验证过真实渲染层的联调**。
+- **审批闸门的真机弹卡**：`verify:approval`（纯 Node）+ `verify:approval-ui`（headless Chrome）全绿，但**真实窗口里的弹卡与三按钮交互**仍需人工确认（本机曾出现 Electron 起窗即 GPU 崩，`--disable-gpu` 无效）。
 - **多显示器**：位置计算按「光标所在屏」做，但只有单屏环境可测，多屏 / 混合 DPI **未验证**。
 - **`full` 态铺满整屏**：Full 态不做原生最大化（`maximizable: false`），要铺满需自绘 `setBounds`，本期没做。
+- **`qa:prototype-v06`（外部设计原型交互校验）**：该原型已不在仓库内，该项记 **n/a（跳过）**，**不是「通过」**——没有被验证过，不要当成已覆盖。
 
 ---
 
@@ -597,9 +849,9 @@ UI 里没填时会尝试从该提供方现有模型推断，推断不出来就�
 
 ### 第三方组件
 
-| 组件 | 许可 | 说明 |
-| --- | --- | --- |
-| [Pi SDK](https://github.com/badlogic/pi-mono)（`npm: @earendil-works/pi-coding-agent`） | MIT | 运行时依赖，走 npm 安装；仓库**不含**其源码 |
+| 组件 | 版本 | 许可 | 说明 |
+| --- | --- | --- | --- |
+| [Pi SDK](https://github.com/badlogic/pi-mono)（`npm: @earendil-works/pi-coding-agent`） | **1.3.0** | MIT | 运行时依赖，走 npm 安装；仓库**不含**其源码 |
 | [Electron](https://www.electronjs.org/) | MIT | 桌面宿主；二进制走 npmmirror 镜像（见 `.npmrc`） |
 | [docx](https://docx.js.org/) | MIT | 产出 .docx |
 

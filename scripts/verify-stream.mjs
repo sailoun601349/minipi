@@ -23,7 +23,7 @@ const ROOT = path.resolve(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "scripts", "out");
 
 const PROMPT = process.argv[2] || "用一句话说明什么是梯度下降";
-const SCENE = process.env.MINIPI_VERIFY_SCENE || "quick";
+const SCENE = process.env.MINIPI_VERIFY_SCENE || "chat";
 const SETTLE_TIMEOUT_MS = 180_000;
 
 /** @type {Array<{seq:number,ts:number,t:number,type:string,delta?:string}>} */

@@ -6,7 +6,7 @@
  *   D1. **契约漂移检查**：`src/renderer/index.html` 内联镜像的
  *       `OUTCOME_FORMAT_IDS` / `OUTCOME_ACTIONS` / `OUTCOME_TITLE_MAX_CHARS` /
  *       `ERROR_CODES` 与 `src/shared/protocol.js` 是否**逐字一致**。
- *       （方砚说她补齐了 4 个错误码——本脚本核对是否真的逐字一致。）
+ *       （前端说她补齐了 4 个错误码——本脚本核对是否真的逐字一致。）
  *   D2. **契约的"用得上"检查**：主进程真会发出的错误码（如 `SANDBOX_DENIED`）
  *       若不在渲染层镜像里，`parseErrorMessage` 会把它降级成 `INTERNAL`——实测这一点。
  *   D3. **守门脚本有效性**：故意改错 `check-scene-consistency.mjs` 覆盖的两个方向
@@ -187,6 +187,46 @@ group("[D1] 渲染层内联镜像 vs protocol.js（逐字一致）");
   ok(extraInHtml.length === 0, `渲染层无多余 ERROR_CODES`, `多出=[${extraInHtml}]`);
 }
 
+/* ------------------------------------------------- D1c: prompt.js 手工副本常量 */
+group("[D1c] prompt.js 手工副本常量 vs protocol.js（零依赖的代价，必须用测试兜住）");
+{
+  // `prompt.js` 是全仓唯一不 import 任何东西的模块（连 `protocol.js` 都不 import，
+  // 好处是纯函数可任意单测）。代价：它把 `LIMITS.PROMPT_MAX_CHARS` **手工复制**了一份
+  // `MAX_PROMPT_CHARS`。两边一旦漂移，后果是静默的、且很难联想到：
+  //   · protocol 改成 40000、prompt.js 还按 32000 切 ⇒ 预算被白白浪费；
+  //   · protocol 改成 24000、prompt.js 还按 32000 切 ⇒ **拼出的提示词超顶**
+  //     ⇒ `generateStructured` 硬抛 `INVALID_ARGUMENT` ⇒ 导出整次失败（降级①都不跑）。
+  // 只靠注释约束等于没有约束，所以在这里用文本比对钉住。
+  const PROMPT_JS = path.join(ROOT, "src", "main", "pi", "outcome", "prompt.js");
+  const promptSrc = fs.readFileSync(PROMPT_JS, "utf8");
+  const protoVal = /PROMPT_MAX_CHARS:\s*(\d+)/.exec(protocolSrc)?.[1];
+  const promptVal = /const MAX_PROMPT_CHARS\s*=\s*(\d+)\s*;/.exec(promptSrc)?.[1];
+  ok(protoVal !== undefined, "protocol.js 里能抽到 LIMITS.PROMPT_MAX_CHARS", protoVal);
+  ok(promptVal !== undefined, "prompt.js 里能抽到 MAX_PROMPT_CHARS（手工副本仍在）", promptVal);
+  ok(
+    protoVal !== undefined && protoVal === promptVal,
+    `两处 PROMPT_MAX_CHARS 一致（protocol=${protoVal} · prompt.js=${promptVal}）`,
+    { protocol: protoVal, promptJs: promptVal },
+  );
+  if (protoVal !== promptVal) {
+    finding(
+      "P2",
+      "D1c-PROMPT_MAX_CHARS",
+      "prompt.js 的 MAX_PROMPT_CHARS 与 LIMITS.PROMPT_MAX_CHARS 漂移",
+      `protocol=${protoVal} · prompt.js=${promptVal}（偏小时会拼出超顶提示词 ⇒ 导出整次失败）`,
+    );
+  }
+  // 顺带守一个方向：预留量必须明显小于总预算，否则 base 一长就无额度可用。
+  const reserveVal = /const RETRY_OVERHEAD_RESERVE\s*=\s*(\d+)\s*;/.exec(promptSrc)?.[1];
+  if (reserveVal !== undefined && protoVal !== undefined) {
+    ok(
+      Number(reserveVal) < Number(protoVal),
+      `RETRY_OVERHEAD_RESERVE(${reserveVal}) < PROMPT_MAX_CHARS(${protoVal})`,
+      { reserve: reserveVal, cap: protoVal },
+    );
+  }
+}
+
 /* --------------------------------------------------------- D1b: description */
 group("[D1b] 场景 description 文案两侧对比（守门脚本不覆盖此字段）");
 {
@@ -301,9 +341,13 @@ await (async () => {
     // sessionManagerMode 五字段，**不比 description**。所以这条会被「漏抓」——
     // 这不是脚本 bug，而是覆盖边界；但因为两侧 description 已经实际漂移（见 D1b），
     // 记录下来作为「守门盲区」的证据。
+    /* ⚠ 锚点**不能写死文案**：这条自测会改 protocol.js 里的 quick description，
+       而 description 是产品文案、迟早会改。写死整句 ⇒ 文案一改锚点就失配，
+       自测退化成空跑（"锚点未命中"这种假绿比红更危险）。
+       改成**结构锚**：定位 `quick: Object.freeze({` 之后的第一个 description 字段。 */
     const mutatedProtocol = protocolBackup.replace(
-      'description: "随手一问：概念、报错、翻译、改写。无工具可用、不落盘。"',
-      'description: "QA-MUTATION-PROTOCOL 随手一问"',
+      /(chat: Object\.freeze\(\{[\s\S]*?description: ")[^"]*(")/,
+      "$1QA-MUTATION-PROTOCOL 随手一问$2",
     );
     if (mutatedProtocol === protocolBackup) {
       ok(false, "方向1：protocol.js 改写未生效（锚点未命中）");
@@ -326,8 +370,8 @@ await (async () => {
 
     // --- 方向 2：改 index.html 的场景 label（应被抓到） ---
     const mutatedHtml = htmlBackup.replace(
-      "    sceneId: 'quick', label: 'quick',",
-      "    sceneId: 'quick', label: 'QA-MUTATION-HTML',",
+      "    sceneId: 'chat', label: 'chat',",
+      "    sceneId: 'chat', label: 'QA-MUTATION-HTML',",
     );
     if (mutatedHtml === htmlBackup) {
       ok(false, "方向2：index.html 改写未生效（锚点未命中）");
@@ -341,15 +385,17 @@ await (async () => {
     }
 
     // --- 方向 3：删一个场景（结构性差异，应被抓到） ---
+    // ⚠ 行尾必须写成 \r?\n：Windows 下这两个文件可能被写成 CRLF（编辑器/脚本都会），
+    //   只认 \n 会让「锚点未命中」，自测就退化成空跑（2026-10-19 踩过）。
     const mutatedDel = protocolBackup.replace(
-      /  desk: Object\.freeze\(\{[\s\S]*?\}\),\n/,
+      /  chat: Object\.freeze\(\{[\s\S]*?\}\),\r?\n/,
       "",
     );
     if (mutatedDel !== protocolBackup) {
       fs.writeFileSync(PROTOCOL, mutatedDel, "utf8");
       const r3 = await runNode(CONSISTENCY, ROOT);
-      ok(r3.status !== 0, `方向3：删 protocol.js 的 desk 场景 → 守门脚本非零退出（实际 ${r3.status}）`);
-      if (r3.status === 0) finding("P2", "D3-BLIND3", "守门脚本漏抓场景整体缺失", "删 desk 后仍退出 0");
+      ok(r3.status !== 0, `方向3：删 protocol.js 的 chat 场景 → 守门脚本非零退出（实际 ${r3.status}）`);
+      if (r3.status === 0) finding("P2", "D3-BLIND3", "守门脚本漏抓场景整体缺失", "删 chat 后仍退出 0");
       restoreAll();
       ok(await assertRestored(), "方向3：已还原并复绿");
     } else {
@@ -358,8 +404,8 @@ await (async () => {
 
     // --- 方向 4：改 protocol.js 的 OUTBOX_SCENES（应是守门范围） ---
     const mutatedOutbox = protocolBackup.replace(
-      'export const OUTBOX_SCENES = Object.freeze(["quick", "note", "desk"]);',
-      'export const OUTBOX_SCENES = Object.freeze(["quick", "note", "desk", "repo"]);',
+      'export const OUTBOX_SCENES = Object.freeze(["chat"]);',
+      'export const OUTBOX_SCENES = Object.freeze(["chat", "work"]);',
     );
     if (mutatedOutbox !== protocolBackup) {
       fs.writeFileSync(PROTOCOL, mutatedOutbox, "utf8");

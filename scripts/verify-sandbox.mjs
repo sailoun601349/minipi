@@ -72,7 +72,7 @@ console.log(`\n 临时沙箱：${tmpRoot}`);
 console.log(` outbox  ：${outboxResolved}`);
 
 /** 便捷：用与 checkWriteTarget 相同的方式算 target，再判定。 */
-function allowed(relOrAbs, sceneId = "note") {
+function allowed(relOrAbs, sceneId = "chat") {
   const r = checkWriteTarget({
     toolName: "write",
     input: { path: relOrAbs },
@@ -204,7 +204,7 @@ if (linkMade) {
       input: { path: path.join(linkPath, "x.txt") },
       cwd: outbox,
       outboxDir: outbox,
-      sceneId: "note",
+      sceneId: "chat",
     }).blocked === false,
     `checkWriteTarget 同样拦截 ${linkKind} 逃逸`,
   );
@@ -254,7 +254,7 @@ for (const tool of ["read", "grep", "find", "ls"]) {
     input: { path: "C:\\Windows\\anything.txt" },
     cwd: outbox,
     outboxDir: outbox,
-    sceneId: "note",
+    sceneId: "chat",
   });
   ok(r.blocked === false, `${tool} → 不拦（只读 allow 取舍）`);
 }
@@ -267,9 +267,9 @@ console.log("\n[8] 场景分流");
 const repoRes = checkWriteTarget({
   toolName: "write",
   input: { path: "C:\\Windows\\x.txt" },
-  cwd: path.join(tmpRoot, "repo"),
+  cwd: path.join(tmpRoot, "work"),
   outboxDir: outbox,
-  sceneId: "repo",
+  sceneId: "work",
 });
 ok(repoRes.blocked === false, "repo 场景 → 不拦（沙箱对它无效，走审批闸门）");
 // outbox 场景：同样的写入应被拦
@@ -278,7 +278,7 @@ const noteRes = checkWriteTarget({
   input: { path: "C:\\Windows\\x.txt" },
   cwd: outbox,
   outboxDir: outbox,
-  sceneId: "note",
+  sceneId: "chat",
 });
 ok(noteRes.blocked === true, "note 场景 → 拦截（对照，证明分流生效）");
 ok(noteRes.reason === SANDBOX_DENY_REASON, "拒绝文案 === SANDBOX_DENY_REASON（逐字）");
@@ -289,7 +289,7 @@ ok(
     input: { path: "../x.txt" },
     cwd: outbox,
     outboxDir: outbox,
-    sceneId: "desk",
+    sceneId: "chat",
   }).blocked === true,
   "desk 场景 → 拦截",
 );
@@ -300,7 +300,7 @@ ok(
     input: { path: "../x.txt" },
     cwd: outbox,
     outboxDir: outbox,
-    sceneId: "quick",
+    sceneId: "chat",
   }).blocked === true,
   "quick 场景 → 同样拦截（防御性）",
 );
@@ -333,13 +333,13 @@ ok(
     input: { path: "../x.txt" },
     cwd: outbox,
     outboxDir: outbox,
-    sceneId: "repo",
+    sceneId: "work",
   }).blocked === false,
   "对照：repo → 仍放行（豁免场景不受影响）",
 );
 // sceneDisposition 三分
-ok(sceneDisposition("note") === "sandbox", "sceneDisposition(note) = sandbox");
-ok(sceneDisposition("repo") === "exempt", "sceneDisposition(repo) = exempt");
+ok(sceneDisposition("chat") === "sandbox", "sceneDisposition(note) = sandbox");
+ok(sceneDisposition("work") === "exempt", "sceneDisposition(repo) = exempt");
 ok(sceneDisposition("nope") === "unknown", "sceneDisposition(nope) = unknown");
 ok(sceneDisposition(undefined) === "unknown", "sceneDisposition(undefined) = unknown");
 
@@ -351,7 +351,7 @@ ok(
     input: { path: "x.txt" },
     cwd: "",
     outboxDir: outbox,
-    sceneId: "note",
+    sceneId: "chat",
   }).blocked === true,
   "缺 cwd → 拒绝（不 fail-open）",
 );
@@ -361,7 +361,7 @@ ok(
     input: { path: "x.txt" },
     cwd: outbox,
     outboxDir: "",
-    sceneId: "note",
+    sceneId: "chat",
   }).blocked === true,
   "缺 outboxDir → 拒绝（不 fail-open）",
 );
@@ -382,7 +382,7 @@ ok(
     input: {},
     cwd: outbox,
     outboxDir: outbox,
-    sceneId: "note",
+    sceneId: "chat",
   }).blocked === true,
   "input.path 缺失 → 拒绝（fail-closed，已修 QA-P2-1）",
 );
@@ -392,7 +392,7 @@ ok(
     input: { file_path: "x.txt" },
     cwd: outbox,
     outboxDir: outbox,
-    sceneId: "note",
+    sceneId: "chat",
   }).blocked === true,
   "错字段名 file_path → 拒绝（fail-closed，SDK 换名即拦）",
 );
@@ -404,7 +404,7 @@ console.log("\n[10] 钩子接线形状（模拟 session.js 的 registerGate）")
 //   · 沙箱违例 → `{ block: true, reason }`（符合 Pi SDK 的 ToolCallEventResult 形状）
 //   · 合法写入 / 非沙箱场景 → `undefined`（放行）
 // ⚠ 这是**复刻**，不是直接执行 session.js。真实 session.js 的挂载仍需 Electron 环境。
-const OUTBOX_SCENE_IDS = ["quick", "note", "desk"];
+const OUTBOX_SCENE_IDS = ["chat", "chat", "chat"];
 function simulateGate({ sceneId, cwd, outboxDir }) {
   const handlers = {};
   const fakePi = { on: (name, fn) => { handlers[name] = fn; } };
@@ -426,7 +426,7 @@ function simulateGate({ sceneId, cwd, outboxDir }) {
   return handlers.tool_call;
 }
 
-const gate = simulateGate({ sceneId: "note", cwd: outbox, outboxDir: outbox });
+const gate = simulateGate({ sceneId: "chat", cwd: outbox, outboxDir: outbox });
 const illegal = gate({ toolName: "write", input: { path: "../x.txt" } });
 ok(
   illegal && illegal.block === true && typeof illegal.reason === "string",
@@ -439,7 +439,7 @@ ok(legal === undefined, "合法写入 → undefined（放行，不改参不阻�
 const readEv = gate({ toolName: "read", input: { path: "C:\\Windows\\x" } });
 ok(readEv === undefined, "read 工具 → undefined（不拦，只读 allow）");
 
-const repoGate = simulateGate({ sceneId: "repo", cwd: path.join(tmpRoot, "repo"), outboxDir: outbox });
+const repoGate = simulateGate({ sceneId: "work", cwd: path.join(tmpRoot, "work"), outboxDir: outbox });
 ok(
   repoGate({ toolName: "write", input: { path: "C:\\Windows\\x" } }) === undefined,
   "repo 场景 → undefined（沙箱不分流，走审批闸门）",

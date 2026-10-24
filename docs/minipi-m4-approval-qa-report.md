@@ -1,6 +1,6 @@
 # minipi · M4 审批闸门主进程侧 · 独立 QA 复验报告
 
-> 测试工程师：秦戈（第三层「证伪」）
+> 测试工程师：安全评审（第三层「证伪」）
 > 日期：2026-09-23
 > 被测交付：M4.1 `approval.js` + M4.2 `protocol.js` 契约 + M4.3/M4.4 接线（`session.js` 规则 2 + `main/index.js` handler + `preload`）
 > 复验依据：`docs/minipi-approval-gate-design.md` v1.1.3 §9.4 对账清单（R1–R5 + T5）
@@ -35,7 +35,7 @@
 
 | 脚本 | 退出码 | 备注 |
 |---|---|---|
-| `verify-approval.mjs` | 0 | 151 项全绿，与白客自述一致 |
+| `verify-approval.mjs` | 0 | 151 项全绿，与协作方自述一致 |
 | `verify-sandbox.mjs` | 0 | |
 | `verify-v04.mjs` | 0 | |
 | `verify-outcome.mjs` | 0 | |
@@ -57,7 +57,7 @@
 | **R3** | **terminate 拒绝文案** | ✅ PASS | 自建：[A1]+[A3] 三套文案两两不同、各有验锚点（`did not respond` / `explicitly denied` / `stop this turn`） |
 | **R4** | **卡片 `actions` / `alwaysAllowEligible` 等字段** | ✅ PASS | 自建：[D1] push 卡 12 个契约字段齐全、`actions` 恒三项、cancel 卡也带 `sessionId`+`actions`+`batch=[]` |
 | **R5** | **会话级 always-allow** | ✅ PASS | 自建：[C1]–[C10]（默认关 / 会话隔离 / 工具隔离 / 仅内存 / 退出即失 / cancelBySession 清 / 审计 / 混合批不开启 / 仅 allowOnce 生效） |
-| **T5** | **定时器泄漏修复** | ⚠️ **PASS（产品）/ 见 P3-1（测试声明不符）** | 自建：[B1]+[B2] allowOnce/deny/terminate 后推进假时钟 10s ⇒ 无二次推卡、无 timeout 审计、0 存活定时器。**但**设计 §9.4 声称「白客补修时已加专项断言」，实测 `verify-approval.mjs` 内**不存在**该断言 |
+| **T5** | **定时器泄漏修复** | ⚠️ **PASS（产品）/ 见 P3-1（测试声明不符）** | 自建：[B1]+[B2] allowOnce/deny/terminate 后推进假时钟 10s ⇒ 无二次推卡、无 timeout 审计、0 存活定时器。**但**设计 §9.4 声称「协作方补修时已加专项断言」，实测 `verify-approval.mjs` 内**不存在**该断言 |
 
 **两条安全红线专项**：
 
@@ -108,7 +108,7 @@
 ### P3-1 · 设计 §9.4 声称的「T5 专项断言」在 `verify-approval.mjs` 中并不存在
 
 - **级别**：P3（轻微 —— 文档/测试声明与事实不符）
-- **描述**：`docs/minipi-approval-gate-design.md` §9.4「T5 记功」段称「**白客补修时已加专项断言**（allowOnce 后推进假时钟到超时点，不得再推卡/记 timeout 审计）」。实测 `scripts/verify-approval.mjs` **不存在**该断言（grep `T5` / `advance` / 假时钟 均无命中；`settled` 只出现在一句注释里）。现有超时测试用的是**真·短定时器**（`timeoutMs: 40/60`），**测不到「已决后旧定时器仍存活」这一 T5 场景**。
+- **描述**：`docs/minipi-approval-gate-design.md` §9.4「T5 记功」段称「**协作方补修时已加专项断言**（allowOnce 后推进假时钟到超时点，不得再推卡/记 timeout 审计）」。实测 `scripts/verify-approval.mjs` **不存在**该断言（grep `T5` / `advance` / 假时钟 均无命中；`settled` 只出现在一句注释里）。现有超时测试用的是**真·短定时器**（`timeoutMs: 40/60`），**测不到「已决后旧定时器仍存活」这一 T5 场景**。
 - **复现步骤**：`cd D:\SAiProject\minipi && node scripts/verify-approval.mjs` 后全文检索 T5 相关断言 → 无。
 - **实际结果**：`verify-approval.mjs` 无 T5 专项断言。
 - **预期结果**：存在一条「allowOnce 后推进到超时点 ⇒ 不再推卡 / 不再记 timeout」的断言。
@@ -140,11 +140,11 @@
 - **定位**：`scripts/verify-sandbox-live.mjs`（[A] 段两条断言的判定条件）
 - **修复建议**：把 [A]-2/[A]-3 改为「若 `writeCalls>0` 则断言回灌/ isError；否则记 N/A 并通过」；或将越界 prompt 改得更强制（明确「必须调用 write 工具」），提高模型发出调用的概率。
 
-#### ✅ N-1 已修复（2026-09-23，秦戈执行，team-lead 授权）
+#### ✅ N-1 已修复（2026-09-23，安全评审执行，team-lead 授权）
 
 **team-lead 的判定问题**：`[A]` 段**是否已有**独立的文件系统底线断言？
 
-**答复：有**。`[A]` 段原有 `ok(!escaped && !existedBefore, "outbox 外未产生文件")`（`fs.existsSync(ESCAPE_FILE)`）就是「不依赖模型行为」的硬证据。**因此无需补核心断言，只需「降级 + 标注」**，改法与白客在 `[C]` 段的一致。
+**答复：有**。`[A]` 段原有 `ok(!escaped && !existedBefore, "outbox 外未产生文件")`（`fs.existsSync(ESCAPE_FILE)`）就是「不依赖模型行为」的硬证据。**因此无需补核心断言，只需「降级 + 标注」**，改法与协作方在 `[C]` 段的一致。
 
 **已做修改**（`scripts/verify-sandbox-live.mjs`）：
 1. 核心断言显式升级标注：`越界写：outbox 外未产生文件（★★★ 核心 · 沙箱真的拦住了 ★★★）` + 注释「删了核心断言就把攻击性用例退化成空跑」。
@@ -204,7 +204,7 @@
 以下**本次未覆盖**，不用于「基本覆盖」含糊带过：
 
 - **真·Electron 端到端**：本机 Electron GPU 会崩，无法起真窗口，故未验证「IPC handler → `assertTrustedSender`（sender 身份校验）→ preload → 渲染层」的**真链路**；`assertTrustedSender`（`main/index.js:345`）仅**读码确认存在**，未实测越权 sender 被拒。
-- **渲染层审批卡 UI（M4.5，方砚）**：不在本次复验范围（主进程侧）。三按钮/倒计时/勾选框/`risk:high` 红色标记等像素级表现**未测**。
+- **渲染层审批卡 UI（M4.5，前端）**：不在本次复验范围（主进程侧）。三按钮/倒计时/勾选框/`risk:high` 红色标记等像素级表现**未测**。
 - **`edit` 真实 diff 的 6 类片段**（前缀/后缀/中间改/纯新增/纯删除/超大）：仅复跑 `verify-approval.mjs` [3] 绿，**未自建**对抗用例。
 - **Windows 保留名 / UNC / 8.3 短名**：属沙箱范畴（`qa-sandbox-attack.mjs` 已覆盖），审批侧不涉及，未重测。
 - **并发多会话**：设计 A3 声明「单窗口单会话（repo 场景）」，本次只测了单会话内并发合并，**多会话并发未测**（设计显式不做）。

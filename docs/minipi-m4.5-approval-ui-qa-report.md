@@ -1,8 +1,8 @@
 # M4.5 渲染层审批卡 UI · 独立 QA 复验报告
 
-> 复验人：秦戈（QA 第三层证伪）
+> 复验人：安全评审（QA 第三层证伪）
 > 日期：见 git log
-> 被测对象：`src/renderer/index.html`（方砚交付，唯一产品文件）
+> 被测对象：`src/renderer/index.html`（前端交付，唯一产品文件）
 > 对照契约：`src/shared/protocol.js`（`ApprovalCard` / `ApprovalBatchItem` JSDoc）、`src/main/pi/approval.js`（`buildBatchItem` / `cardMeta`）
 
 ---
@@ -12,12 +12,12 @@
 | 项 | 说明 |
 |---|---|
 | 环境 | headless Chrome + CDP（`--headless=new`），mock 模式（`window.__minipi.mock() === true`） |
-| 端口 | 9395（与方砚 9393 错开） |
+| 端口 | 9395（与前端 9393 错开） |
 | 测试脚本 | `scripts/qa-approval-ui-independent.mjs`（**我独立构造**，57 断言） |
-| 是否复跑方砚 | **否**。未复跑 `qa-approval-ui.mjs` 的 51 项，全部断言由我独立构造 |
+| 是否复跑前端 | **否**。未复跑 `qa-approval-ui.mjs` 的 51 项，全部断言由我独立构造 |
 | 数据前缀 | 注入卡 `approvalId` 用 `a_*` 前缀（`a_mixed`/`a_u`/`a_exp`…），mock 卡 `a_1`/`a_2`；测后 `cancelAll` 清理 |
 
-**独立构造的验证重点**（对齐 team-lead 六点 A–F，且不重跑方砚 51 项）：
+**独立构造的验证重点**（对齐 team-lead 六点 A–F，且不重跑前端 51 项）：
 
 | 组 | 覆盖点 | 断言数 |
 |---|---|---|
@@ -46,7 +46,7 @@
 | 安全（C1 XSS / C2 过滤 / D2 remember 不外泄） | 8 | 8 | 0 |
 | **合计** | **59** | **59** | **0** |
 
-> 初验 57 断言：56 PASS / 1 FAIL（P2-UI-1），另发现 P3-UI-1。方砚修复后，脚本补 [B4] 回归断言（59 断言），复跑 **59/0 全绿，EXIT=0 干净退出**。两个缺陷均已闭环。安全红线（M4 主进程侧 #9/#12）本层不涉及，渲染层 XSS 全向量与 remember 外泄均 PASS。
+> 初验 57 断言：56 PASS / 1 FAIL（P2-UI-1），另发现 P3-UI-1。前端修复后，脚本补 [B4] 回归断言（59 断言），复跑 **59/0 全绿，EXIT=0 干净退出**。两个缺陷均已闭环。安全红线（M4 主进程侧 #9/#12）本层不涉及，渲染层 XSS 全向量与 remember 外泄均 PASS。
 
 ---
 
@@ -83,7 +83,7 @@
     return a.length ? a : APPROVAL_ACTION_IDS.slice();
   })(),
   ```
-- **修复状态**：方砚已修（`normalizeApprovalCard` 增加 filter 后为空回退）。回归证据（`node scripts/qa-approval-ui-independent.mjs`）：
+- **修复状态**：前端已修（`normalizeApprovalCard` 增加 filter 后为空回退）。回归证据（`node scripts/qa-approval-ui-independent.mjs`）：
   ```
   PASS  [C2b] actions 全非法 ⇒ 回退契约镜像三值（已修复：不再空按钮）  · ["allowOnce","deny","terminate"]
   PASS  [C2b] 该卡渲染且含三按钮可操作  · true
@@ -107,12 +107,12 @@
   const box = document.querySelector(`.approval[data-approval-id="${cssEscape(approvalId)}"]`);
   ```
 - **修复建议**：点击处理器已能拿到被点元素（`:2975` `apAct.closest('.approval')`），可将 `box` 一路传入 `doApprovalDecide`，或在此处改用 `apAct.closest('.approval')` 得到的真实卡片节点；至少应限定为实际被点的视图副本。
-- **修复状态**：方砚已修（`doApprovalDecide` 增加第 4 参 `boxEl`，点击处理器 `:2986` 传入 `apAct.closest('.approval')`）。回归证据（脚本新增 [B4] 段）：
+- **修复状态**：前端已修（`doApprovalDecide` 增加第 4 参 `boxEl`，点击处理器 `:2986` 传入 `apAct.closest('.approval')`）。回归证据（脚本新增 [B4] 段）：
   ```
   PASS  [B4] 点 full 副本 → 被点 full 副本进入 deciding + 按钮 disabled（P3-UI-1 已修复）  · {"fullDeciding":true,"fullBtnDisabled":true}
   ```
 
-### 附注（非缺陷，供方砚/team-lead 知悉）
+### 附注（非缺陷，供前端/team-lead 知悉）
 
 - `approvalOverflow` 探针（`index.html:3953-3959`）用**卡级** `scrollWidth` 判溢出，会因卡内 `<pre>{overflow:auto; white-space:pre}` 内部横向滚动而误报 `overflows:true`。实测 `pageHScroll:false`、`docScroll.sw===cw`（页面无横滚）。建议该探针改为判「页面级横滚」或「pre 是否被裁剪」，避免后续回归脚本追一个假阳性。
 
@@ -131,7 +131,7 @@
 | F 自设边界（decide 失败复位 / remember 不外泄 / 畸形卡） | **PASS** | [D1] 失败后 `.approval--deciding` 移除、按钮复位可重试、toast 可读；[D2] deny 不带 remember（toast 无「本会话总是允许」）、对照 allowOnce 带 remember；[D3] 8 张畸形卡不抛错、缺 id 卡被忽略、超长不造成页面横滚 |
 | G 副本定位（full 副本 deciding 打到被点副本） | **PASS** | [B4] 点 full 副本 → full 副本进入 deciding + disabled（P3-UI-1 已修复） |
 
-**我复跑方砚的**：无（0 项）。全部 59 断言独立构造（初验 57 + 修复后补 [B4] 回归 2 条）。
+**我复跑前端的**：无（0 项）。全部 59 断言独立构造（初验 57 + 修复后补 [B4] 回归 2 条）。
 
 ---
 
@@ -140,8 +140,8 @@
 **可以交付（回归通过）。**
 
 - 渲染层审批卡 UI 的契约对齐、三态状态机、超时交互、XSS 防护、remember 不外泄、畸形卡容错、full 副本定位均验证通过（**59/59，EXIT=0**）。
-- 初验发现的 **P2-UI-1**（空按钮死卡）与 **P3-UI-1**（full 副本 deciding 错位）均已被方砚修复，回归断言 [C2b]/[B4] PASS。
-- 未覆盖（同方砚声明，不重复声明）：真 IPC 往返 / 真 shell 执行 / 真服务端超时。本复验未引入新的盲区。
+- 初验发现的 **P2-UI-1**（空按钮死卡）与 **P3-UI-1**（full 副本 deciding 错位）均已被前端修复，回归断言 [C2b]/[B4] PASS。
+- 未覆盖（同前端声明，不重复声明）：真 IPC 往返 / 真 shell 执行 / 真服务端超时。本复验未引入新的盲区。
 
 ---
 

@@ -1,7 +1,7 @@
 /**
  * M4 审批闸门 —— 独立 QA 复验（契约组 D + 攻击组 E）
  * ============================================================================
- * 秦戈 · 第三层「证伪」。
+ * 安全评审 · 第三层「证伪」。
  *   D 契约与降级：卡片六字段 / 非法 action / fail-closed / 重启丢弃 / 契约漂移
  *   E 攻击测试：并发 id 复用 / 场景路由（repo 弹卡、outbox 不弹）/ 恶意输入
  *
@@ -45,7 +45,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "minipi-qa-appr-ct-"));
 const home = path.join(tmp, "home");
 const appDir = path.join(home, ".minipi");
 fs.mkdirSync(appDir, { recursive: true });
-const cwd = path.join(appDir, "repo");
+const cwd = path.join(appDir, "work");
 fs.mkdirSync(cwd, { recursive: true });
 
 function fakeClock() {
@@ -107,7 +107,7 @@ console.log("\n[D1] 卡片六字段契约（§9.3：sessionId/kind/toolName/titl
 {
   const clock = fakeClock();
   const { gate, pushed } = makeGate();
-  gate.request({ sessionId: "sD1", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "hi" }, cwd });
+  gate.request({ sessionId: "sD1", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "hi" }, cwd });
   const card = pushed[0];
   const required = ["approvalId", "phase", "sessionId", "createdAt", "expiresAt", "timeoutMs", "actions", "kind", "toolName", "title", "alwaysAllowEligible", "batch"];
   const missing = required.filter((k) => !(k in card));
@@ -116,7 +116,7 @@ console.log("\n[D1] 卡片六字段契约（§9.3：sessionId/kind/toolName/titl
   ok(card.kind === "write", "[D1] kind=write", String(card.kind));
   ok(card.toolName === "write", "[D1] toolName=write", String(card.toolName));
   ok(typeof card.title === "string" && card.title.length > 0, "[D1] title 非空", String(card.title));
-  ok(Array.isArray(card.actions) && card.actions.length === 3, "[D1] actions 恒为三项", JSON.stringify(card.actions));
+  ok(Array.isArray(card.actions) && card.actions.length === 4, "[D1] actions 恒为四项", JSON.stringify(card.actions));
   ok(JSON.stringify(card.actions) === JSON.stringify(APPROVAL_ACTION_IDS), "[D1] actions === APPROVAL_ACTION_IDS", JSON.stringify(card.actions));
   ok(card.alwaysAllowEligible === true, "[D1] 单工具卡 alwaysAllowEligible=true", String(card.alwaysAllowEligible));
   ok(Array.isArray(card.batch) && card.batch.length === 1, "[D1] batch 为数组且含 1 项");
@@ -136,7 +136,7 @@ console.log("\n[D2] 非法 action ⇒ INVALID_ARGUMENT（绝不静默当 allow�
 {
   const clock = fakeClock();
   const { gate } = makeGate();
-  const p = gate.request({ sessionId: "sD2", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p = gate.request({ sessionId: "sD2", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   const bad = ["allow", "ALLOW", "AllowOnce", "", null, 0, "denyAll", "terminate!", undefined, {}, []];
   let allThrew = true;
   const reasons = [];
@@ -160,7 +160,7 @@ console.log("\n[D2] 非法 action ⇒ INVALID_ARGUMENT（绝不静默当 allow�
 
   // ⚠ 关键：两值写法 "allow" 绝不能退化成放行
   const { gate: g2 } = makeGate();
-  const p2 = g2.request({ sessionId: "sD2b", sceneId: "repo", toolName: "bash", input: { command: "rm x" }, cwd });
+  const p2 = g2.request({ sessionId: "sD2b", sceneId: "work", toolName: "bash", input: { command: "rm x" }, cwd });
   let threwAllow = false;
   try {
     g2.decide({ approvalId: "a_1", action: "allow" });
@@ -181,16 +181,16 @@ console.log("\n[D3] fail-closed：异常路径绝不放行");
   // (a) 非审批工具兜底：resolve allowOnce 但不建卡（这是设计允许的「无审批工具」）
   const clock = fakeClock();
   const { gate, pushed } = makeGate();
-  const r = await gate.request({ sessionId: "sD3", sceneId: "repo", toolName: "read", input: { path: "a.txt" }, cwd });
+  const r = await gate.request({ sessionId: "sD3", sceneId: "work", toolName: "read", input: { path: "a.txt" }, cwd });
   ok(r.action === "allowOnce" && pushed.length === 0, "[D3] 非审批工具直接放行且不建卡", JSON.stringify(r));
 
   // (b) buildBatchItem 无法构造 item 时：resolve allowOnce 不建卡（防御：无 toolName）
-  const rEmpty = await gate.request({ sessionId: "sD3", sceneId: "repo", toolName: "", input: {}, cwd });
+  const rEmpty = await gate.request({ sessionId: "sD3", sceneId: "work", toolName: "", input: {}, cwd });
   ok(rEmpty.action === "allowOnce" && gate.pendingCount === 0, "[D3] 空 toolName 不建卡", JSON.stringify(rEmpty));
 
   // (c) 超时永远 deny（已在 A5，这里再确认 fail-closed 语义在契约层）
   const { gate: g2 } = makeGate({ timeoutMs: 50 });
-  const p = g2.request({ sessionId: "sD3c", sceneId: "repo", toolName: "bash", input: { command: "shutdown" }, cwd });
+  const p = g2.request({ sessionId: "sD3c", sceneId: "work", toolName: "bash", input: { command: "shutdown" }, cwd });
   clock.advance(50);
   const rt = await p;
   ok(rt.action === "deny", "[D3] 超时 = deny（fail-closed）", rt.action);
@@ -265,7 +265,7 @@ console.log("\n[E1] 并发：同会话并发请求合并进同卡、整批同时
   const { gate, pushed } = makeGate();
   const ps = [];
   for (let i = 0; i < 5; i += 1) {
-    ps.push(gate.request({ sessionId: "sE1", sceneId: "repo", toolName: "bash", input: { command: `echo ${i}` }, cwd }));
+    ps.push(gate.request({ sessionId: "sE1", sceneId: "work", toolName: "bash", input: { command: `echo ${i}` }, cwd }));
   }
   ok(gate.pendingCount === 1, "[E1] 5 个并发请求合并为 1 张卡", String(gate.pendingCount));
   const entry = gate.peek("a_1");
@@ -285,7 +285,7 @@ console.log("\n[E2] 批上限：超过 batchMax 新建卡（上一张继续等�
   const { gate } = makeGate({ batchMax: 3 });
   const ps = [];
   for (let i = 0; i < 5; i += 1) {
-    ps.push(gate.request({ sessionId: "sE2", sceneId: "repo", toolName: "bash", input: { command: `c${i}` }, cwd }));
+    ps.push(gate.request({ sessionId: "sE2", sceneId: "work", toolName: "bash", input: { command: `c${i}` }, cwd }));
   }
   ok(gate.pendingCount === 2, "[E2] 5 条 / 上限 3 ⇒ 2 张卡", String(gate.pendingCount));
   const first = gate.peek("a_1");
@@ -307,7 +307,7 @@ console.log("\n[E3] id 复用攻击：伪造 / 猜测 approvalId");
 {
   const clock = fakeClock();
   const { gate } = makeGate();
-  const p = gate.request({ sessionId: "sE3", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p = gate.request({ sessionId: "sE3", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   // 猜测不存在的 id
   const guesses = ["a_0", "a_2", "a_999", "", "A_1", "a_1 ", " a_1", "__proto__", "constructor", "toString"];
   let allNotFound = true;
@@ -351,18 +351,18 @@ console.log("\n[E4] 场景路由：repo 弹卡、outbox 不弹（对齐 §8.3）
     if (!APPROVAL_TOOLS_LOCAL.includes(toolName)) return "no-approval"; // ② 只读放行
     return "approval"; // ③ repo + 审批工具
   };
-  ok(routes("repo", "bash") === "approval", "[E4] repo + bash ⇒ 弹卡");
-  ok(routes("repo", "write") === "approval", "[E4] repo + write ⇒ 弹卡");
-  ok(routes("repo", "edit") === "approval", "[E4] repo + edit ⇒ 弹卡");
-  ok(routes("repo", "powershell") === "approval", "[E4] repo + powershell ⇒ 弹卡");
-  ok(routes("repo", "read") === "no-approval", "[E4] repo + read ⇒ 不弹（只读放行）");
-  ok(routes("repo", "grep") === "no-approval", "[E4] repo + grep ⇒ 不弹");
+  ok(routes("work", "bash") === "approval", "[E4] repo + bash ⇒ 弹卡");
+  ok(routes("work", "write") === "approval", "[E4] repo + write ⇒ 弹卡");
+  ok(routes("work", "edit") === "approval", "[E4] repo + edit ⇒ 弹卡");
+  ok(routes("work", "powershell") === "approval", "[E4] repo + powershell ⇒ 弹卡");
+  ok(routes("work", "read") === "no-approval", "[E4] repo + read ⇒ 不弹（只读放行）");
+  ok(routes("work", "grep") === "no-approval", "[E4] repo + grep ⇒ 不弹");
   for (const s of OUTBOX_SCENES) {
     ok(routes(s, "bash") === "no-approval", `[E4] outbox 场景 ${s} + bash ⇒ 不弹卡`);
     ok(routes(s, "write") === "no-approval", `[E4] outbox 场景 ${s} + write ⇒ 不弹卡`);
   }
   // quick 无工具
-  ok(routes("quick", "bash") === "no-approval", "[E4] quick + bash ⇒ 不弹（quick 无工具/防御性放行）");
+  ok(routes("chat", "bash") === "no-approval", "[E4] quick + bash ⇒ 不弹（quick 无工具/防御性放行）");
 }
 
 /* ================================================================= E5 */
@@ -386,7 +386,7 @@ console.log("\n[E5] 恶意输入：畸形 input 不崩溃、不逃逸");
   let crashed = false;
   for (const input of evil) {
     try {
-      const p = gate.request({ sessionId: "sE5", sceneId: "repo", toolName: "bash", input, cwd });
+      const p = gate.request({ sessionId: "sE5", sceneId: "work", toolName: "bash", input, cwd });
       // 立刻取消，避免悬空
       gate.cancelBySession("sE5");
       await p;
@@ -419,7 +419,7 @@ console.log("\n[E6] 审计/落盘不含 write 全文 content（§3.5/§7）");
   const clock = fakeClock();
   const { gate, audited } = makeGate();
   const SECRET_CONTENT = "PASSWORD=hunter2\n" + "z".repeat(5000);
-  const p = gate.request({ sessionId: "sE6", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: SECRET_CONTENT }, cwd });
+  const p = gate.request({ sessionId: "sE6", sceneId: "work", toolName: "write", input: { path: "a.txt", content: SECRET_CONTENT }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce" });
   await p;
   const blob = JSON.stringify(audited);

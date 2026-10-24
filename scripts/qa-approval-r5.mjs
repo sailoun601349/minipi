@@ -1,7 +1,7 @@
 /**
  * M4 审批闸门 —— 独立 QA 复验（R5 组 C：会话级 always-allow + 沙箱优先）
  * ============================================================================
- * 秦戈 · 第三层「证伪」。核心是两条**安全红线**：
+ * 安全评审 · 第三层「证伪」。核心是两条**安全红线**：
  *   🔴 #9 沙箱优先于 always-allow —— 即便用户开了「本会话总是允许 write」，
  *        沙箱违例（写 outbox 之外）**必须仍被拦**，绝不能因 always-allow 放行。
  *   🔴 #12 remember 透传 —— 已读码确认 index.js:428 透传；此处补行为验证「模型
@@ -59,7 +59,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "minipi-qa-appr-r5-"));
 const home = path.join(tmp, "home");
 const appDir = path.join(home, ".minipi");
 fs.mkdirSync(appDir, { recursive: true });
-const cwd = path.join(home, ".minipi", "repo");
+const cwd = path.join(home, ".minipi", "work");
 fs.mkdirSync(cwd, { recursive: true });
 
 // 沙箱用的 outbox 目录（模拟真实 outbox）
@@ -131,11 +131,11 @@ console.log("\n[C1] 默认关：未 remember 时 isAlwaysAllowed=false");
 {
   const clock = fakeClock();
   const { gate } = makeGate();
-  const p = gate.request({ sessionId: "sC1", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
-  ok(gate.isAlwaysAllowed("sC1", "write") === false, "[C1] 建卡后默认未开启 always-allow");
+  const p = gate.request({ sessionId: "sC1", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  ok(gate.isAlwaysAllowed("sC1", "write", path.join(cwd, "a.txt")) === false, "[C1] 建卡后默认未开启 always-allow");
   gate.decide({ approvalId: "a_1", action: "allowOnce" }); // 无 remember
   await p;
-  ok(gate.isAlwaysAllowed("sC1", "write") === false, "[C1] allowOnce（无 remember）后仍为 false —— remember 是开启的唯一钥匙");
+  ok(gate.isAlwaysAllowed("sC1", "write", path.join(cwd, "a.txt")) === false, "[C1] allowOnce（无 remember）后仍为 false —— remember 是开启的唯一钥匙");
   clock.restore();
 }
 
@@ -145,13 +145,13 @@ console.log("\n[C2] remember:true + allowOnce ⇒ 本会话该工具后续直接
 {
   const clock = fakeClock();
   const { gate, pushed } = makeGate();
-  const p = gate.request({ sessionId: "sC2", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p = gate.request({ sessionId: "sC2", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await p;
-  ok(gate.isAlwaysAllowed("sC2", "write") === true, "[C2] remember:true ⇒ isAlwaysAllowed=true");
+  ok(gate.isAlwaysAllowed("sC2", "write", path.join(cwd, "a.txt")) === true, "[C2] remember:true ⇒ isAlwaysAllowed=true");
 
   const before = pushed.length;
-  const p2 = gate.request({ sessionId: "sC2", sceneId: "repo", toolName: "write", input: { path: "b.txt", content: "y" }, cwd });
+  const p2 = gate.request({ sessionId: "sC2", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "y" }, cwd });
   const r2 = await p2;
   ok(r2.action === "allowOnce", "[C2] 第二次同工具 request 直接 resolve allowOnce（免审批）", r2.action);
   ok(pushed.length === before, "[C2] 第二次未推任何卡（pushed 数不变）", `before=${before} after=${pushed.length}`);
@@ -165,13 +165,13 @@ console.log("\n[C3] 作用域 · 会话隔离：只对该会话放行");
 {
   const clock = fakeClock();
   const { gate, pushed } = makeGate();
-  const p = gate.request({ sessionId: "sC3a", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p = gate.request({ sessionId: "sC3a", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await p;
-  ok(gate.isAlwaysAllowed("sC3a", "write") === true, "[C3] 会话 A 已开启");
+  ok(gate.isAlwaysAllowed("sC3a", "write", path.join(cwd, "a.txt")) === true, "[C3] 会话 A 已开启");
 
   const before = pushed.length;
-  const pB = gate.request({ sessionId: "sC3b", sceneId: "repo", toolName: "write", input: { path: "c.txt", content: "z" }, cwd });
+  const pB = gate.request({ sessionId: "sC3b", sceneId: "work", toolName: "write", input: { path: "c.txt", content: "z" }, cwd });
   ok(gate.pendingCount === 1, "[C3] 换会话 B 同工具 ⇒ 仍建 pending（未放行）", String(gate.pendingCount));
   ok(pushed.length === before + 1 && pushed[pushed.length - 1].phase === "push", "[C3] 会话 B 推了新卡");
   gate.cancelBySession("sC3b");
@@ -185,14 +185,14 @@ console.log("\n[C4] 作用域 · 工具隔离：只对该工具放行");
 {
   const clock = fakeClock();
   const { gate, pushed } = makeGate();
-  const p = gate.request({ sessionId: "sC4", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p = gate.request({ sessionId: "sC4", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await p;
-  ok(gate.isAlwaysAllowed("sC4", "write") === true, "[C4] write 已开启");
+  ok(gate.isAlwaysAllowed("sC4", "write", path.join(cwd, "a.txt")) === true, "[C4] write 已开启");
   ok(gate.isAlwaysAllowed("sC4", "bash") === false, "[C4] 同会话 bash 仍未开启");
 
   const before = pushed.length;
-  const pBash = gate.request({ sessionId: "sC4", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const pBash = gate.request({ sessionId: "sC4", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   ok(gate.pendingCount === 1, "[C4] 同会话 bash ⇒ 仍弹卡（工具隔离）", String(gate.pendingCount));
   ok(pushed.length === before + 1, "[C4] bash 推了新卡");
   gate.cancelBySession("sC4");
@@ -206,7 +206,7 @@ console.log("\n[C5] 仅内存：always-allow 不落盘");
 {
   const clock = fakeClock();
   const { gate } = makeGate();
-  const p = gate.request({ sessionId: "sC5", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p = gate.request({ sessionId: "sC5", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await p;
   // 推进假时钟越过 200ms 去抖 ⇒ 触发 _flush() 落盘
@@ -225,17 +225,17 @@ console.log("\n[C6] 退出即失：重启（新实例）后记忆清空");
 {
   const clock = fakeClock();
   const { gate } = makeGate();
-  const p = gate.request({ sessionId: "sC6", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p = gate.request({ sessionId: "sC6", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await p;
-  ok(gate.isAlwaysAllowed("sC6", "write") === true, "[C6] 实例 1 已开启");
+  ok(gate.isAlwaysAllowed("sC6", "write", path.join(cwd, "a.txt")) === true, "[C6] 实例 1 已开启");
 
   // 模拟重启：新 ApprovalGate 实例（同 appDir），内存态归零
   const { gate: gate2 } = makeGate();
-  ok(gate2.isAlwaysAllowed("sC6", "write") === false, "[C6] 新实例（重启）后 isAlwaysAllowed=false —— 仅内存、不持久化");
+  ok(gate2.isAlwaysAllowed("sC6", "write", path.join(cwd, "a.txt")) === false, "[C6] 新实例（重启）后 isAlwaysAllowed=false —— 仅内存、不持久化");
 
   // 且新实例里同会话同工具会重新弹卡
-  const p2 = gate2.request({ sessionId: "sC6", sceneId: "repo", toolName: "write", input: { path: "b.txt", content: "y" }, cwd });
+  const p2 = gate2.request({ sessionId: "sC6", sceneId: "work", toolName: "write", input: { path: "b.txt", content: "y" }, cwd });
   ok(gate2.pendingCount === 1, "[C6] 重启后同工具重新弹卡（记忆未跨实例）", String(gate2.pendingCount));
   gate2.cancelBySession("sC6");
   await p2;
@@ -248,15 +248,15 @@ console.log("\n[C7] cancelBySession 清记忆：清后同会话同工具重新�
 {
   const clock = fakeClock();
   const { gate, pushed } = makeGate();
-  const p = gate.request({ sessionId: "sC7", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p = gate.request({ sessionId: "sC7", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await p;
-  ok(gate.isAlwaysAllowed("sC7", "write") === true, "[C7] 开启后为 true");
+  ok(gate.isAlwaysAllowed("sC7", "write", path.join(cwd, "a.txt")) === true, "[C7] 开启后为 true");
   gate.cancelBySession("sC7"); // 会话销毁（即便无未决卡，也应清记忆）
-  ok(gate.isAlwaysAllowed("sC7", "write") === false, "[C7] cancelBySession 后记忆被清（即便无 pending）");
+  ok(gate.isAlwaysAllowed("sC7", "write", path.join(cwd, "a.txt")) === false, "[C7] cancelBySession 后记忆被清（即便无 pending）");
 
   const before = pushed.length;
-  const p2 = gate.request({ sessionId: "sC7", sceneId: "repo", toolName: "write", input: { path: "c.txt", content: "z" }, cwd });
+  const p2 = gate.request({ sessionId: "sC7", sceneId: "work", toolName: "write", input: { path: "c.txt", content: "z" }, cwd });
   ok(gate.pendingCount === 1, "[C7] 清记忆后同工具重新弹卡", String(gate.pendingCount));
   ok(pushed.length === before + 1, "[C7] 重新推卡（phase=push）", pushed[pushed.length - 1]?.phase);
   gate.cancelBySession("sC7");
@@ -270,14 +270,16 @@ console.log("\n[C8] 审计：开启当刻落 always_allow_enabled 事件（脱�
 {
   const clock = fakeClock();
   const { gate, audited } = makeGate();
-  const p = gate.request({ sessionId: "sC8", sceneId: "repo", toolName: "bash", input: { command: "SECRET_TOKEN=abc curl -H 'Authorization: Bearer xyz' http://h" }, cwd });
+  // 文件级记忆只对 write/edit 生效（命令类没有"文件"可记），所以这里用 write 验审计。
+  const p = gate.request({ sessionId: "sC8", sceneId: "work", toolName: "write", input: { path: "secret-token.md", content: "SECRET_TOKEN=abc" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await p;
   const ev = audited.find((a) => a.event === "always_allow_enabled");
   ok(!!ev, "[C8] 审计含 always_allow_enabled 事件", JSON.stringify(audited.map((a) => a.event)));
-  ok(ev && ev.toolName === "bash", "[C8] 事件 toolName=bash", String(ev?.toolName));
-  // R5 审计事件本身不含命令内容（只记 kind/toolName/summary 文案）——这是 R5 事件的质量点。
-  ok(ev && !/curl|http:\/\/h/.test(String(ev.summary ?? "")), "[C8] always_allow_enabled 事件不含命令原文（只记工具名与固定文案）", String(ev?.summary));
+  ok(ev && ev.toolName === "write", "[C8] 事件 toolName=write", String(ev?.toolName));
+  // 审计只记「文件名 + 固定文案」，不写文件内容
+  ok(ev && !/SECRET_TOKEN/.test(String(ev.summary ?? "")), "[C8] 事件不含文件内容（只记文件名与固定文案）", String(ev?.summary));
+  ok(ev && /secret-token\.md/.test(String(ev.summary ?? "")), "[C8] 事件含文件名（可追溯是哪个文件）", String(ev?.summary));
   clock.restore();
 }
 
@@ -288,13 +290,13 @@ console.log("\n[C9] 混合工具批不开启（alwaysAllowEligible=false ⇒ 不
   const clock = fakeClock();
   const { gate } = makeGate();
   // 同会话混合：write + bash ⇒ 一张卡、kind 混合 ⇒ alwaysAllowEligible=false
-  const p1 = gate.request({ sessionId: "sC9", sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
-  const p2 = gate.request({ sessionId: "sC9", sceneId: "repo", toolName: "bash", input: { command: "ls" }, cwd });
+  const p1 = gate.request({ sessionId: "sC9", sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+  const p2 = gate.request({ sessionId: "sC9", sceneId: "work", toolName: "bash", input: { command: "ls" }, cwd });
   const meta = cardMeta(gate.peek("a_1"));
   ok(meta.alwaysAllowEligible === false, "[C9] 混合批 alwaysAllowEligible=false", JSON.stringify(meta));
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await Promise.all([p1, p2]);
-  ok(gate.isAlwaysAllowed("sC9", "write") === false, "[C9] 混合批 remember 不写 write 记忆");
+  ok(gate.isAlwaysAllowed("sC9", "write", path.join(cwd, "a.txt")) === false, "[C9] 混合批 remember 不写 write 记忆");
   ok(gate.isAlwaysAllowed("sC9", "bash") === false, "[C9] 混合批 remember 不写 bash 记忆");
   clock.restore();
 }
@@ -306,10 +308,10 @@ console.log("\n[C10] remember 仅对 allowOnce 生效：deny / terminate + remem
   for (const action of ["deny", "terminate"]) {
     const clock = fakeClock();
     const { gate } = makeGate();
-    const p = gate.request({ sessionId: `sC10_${action}`, sceneId: "repo", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
+    const p = gate.request({ sessionId: `sC10_${action}`, sceneId: "work", toolName: "write", input: { path: "a.txt", content: "x" }, cwd });
     gate.decide({ approvalId: "a_1", action, remember: true });
     await p;
-    ok(gate.isAlwaysAllowed(`sC10_${action}`, "write") === false, `[C10] ${action} + remember:true ⇒ 不开启 always-allow（仅 allowOnce 有效）`);
+    ok(gate.isAlwaysAllowed(`sC10_${action}`, "write", path.join(cwd, "a.txt")) === false, `[C10] ${action} + remember:true ⇒ 不开启 always-allow（仅 allowOnce 有效）`);
     clock.restore();
   }
 }
@@ -322,15 +324,15 @@ console.log("\n[C11] 🔴 安全红线 #9：沙箱优先于 always-allow（端�
   const { gate, pushed } = makeGate();
 
   // 先开 always-allow：本会话总是允许 write
-  const pOpen = gate.request({ sessionId: "sC11", sceneId: "repo", toolName: "write", input: { path: "ok.txt", content: "x" }, cwd });
+  const pOpen = gate.request({ sessionId: "sC11", sceneId: "work", toolName: "write", input: { path: "ok.txt", content: "x" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce", remember: true });
   await pOpen;
-  ok(gate.isAlwaysAllowed("sC11", "write") === true, "[C11] 前置：本会话已总是允许 write");
+  ok(gate.isAlwaysAllowed("sC11", "write", path.join(cwd, "ok.txt")) === true, "[C11] 前置：本会话已总是允许 write");
 
   // 还原 session.js 规则 1 + 规则 2 的**顺序**（沙箱在前，审批在后），并以 outbox 场景验证：
   // 规则 1 命中 ⇒ 直接 block{ sandbox reason }，**根本不调用 approval.request**
   // 规则 2（outbox 场景）⇒ return undefined，根本不进审批
-  const sandboxed = OUTBOX_SCENES.includes("note"); // note 是 outbox 场景
+  const sandboxed = OUTBOX_SCENES.includes("chat"); // note 是 outbox 场景
   ok(sandboxed === true, "[C11] note 属 OUTBOX_SCENES（受沙箱约束）");
 
   // 构造一个越界的写：目标在 outbox 之外（cwd 之外）
@@ -340,7 +342,7 @@ console.log("\n[C11] 🔴 安全红线 #9：沙箱优先于 always-allow（端�
     input: escapeInput,
     cwd: outboxDir, // note 场景 cwd 落在 outbox
     outboxDir,
-    sceneId: "note",
+    sceneId: "chat",
   });
   ok(verdict.blocked === true, "[C11] 沙箱对越界写判定 blocked=true", JSON.stringify(verdict));
 
@@ -362,7 +364,7 @@ console.log("\n[C11] 🔴 安全红线 #9：沙箱优先于 always-allow（端�
   };
 
   const before = pushed.length;
-  const gateResult = await registerGateSim("note", "write", escapeInput);
+  const gateResult = await registerGateSim("chat", "write", escapeInput);
   ok(gateResult && gateResult.block === true, "[C11] 🔴 越界写被 block（即便 always-allow 已开）", JSON.stringify(gateResult));
   ok(approvalCalled === false, "[C11] 🔴 沙箱违例**根本没有进审批**（approval.request 未被调用）");
   ok(pushed.length === before, "[C11] 🔴 沙箱违例未推任何审批卡（不给用户『允许』的机会）", `pushed ${before}→${pushed.length}`);
@@ -370,9 +372,9 @@ console.log("\n[C11] 🔴 安全红线 #9：沙箱优先于 always-allow（端�
 
   // 对照：outbox 场景内**合法**写 ⇒ 沙箱通过 + 不进审批（放行）
   const okInput = { path: path.join(outboxDir, "legit.md"), content: "hi" };
-  const okVerdict = checkWriteTarget({ toolName: "write", input: okInput, cwd: outboxDir, outboxDir, sceneId: "note" });
+  const okVerdict = checkWriteTarget({ toolName: "write", input: okInput, cwd: outboxDir, outboxDir, sceneId: "chat" });
   ok(okVerdict.blocked === false, "[C11] 对照：outbox 内合法写沙箱放行", JSON.stringify(okVerdict));
-  const okResult = await registerGateSim("note", "write", okInput);
+  const okResult = await registerGateSim("chat", "write", okInput);
   ok(okResult === undefined, "[C11] 对照：outbox 内合法写不进审批、直接放行");
   clock.restore();
 }
@@ -388,15 +390,15 @@ console.log("\n[C12] 🔴 安全红线 #12：模型输入无路径可打开 alwa
   //     模型能控制的只有 tool_call 的 input；input 里塞 remember 不影响审批记忆
   const p = gate.request({
     sessionId: "sC12",
-    sceneId: "repo",
+    sceneId: "work",
     toolName: "write",
     input: { path: "a.txt", content: "x", remember: true, _remember: true, alwaysAllow: true }, // 模型在 input 里伪造
     cwd,
   });
-  ok(gate.isAlwaysAllowed("sC12", "write") === false, "[C12] 🔴 input 里伪造 remember/alwaysAllow ⇒ **不**开记忆（request 不读 input 里的标记）");
+  ok(gate.isAlwaysAllowed("sC12", "write", path.join(cwd, "a.txt")) === false, "[C12] 🔴 input 里伪造 remember/alwaysAllow ⇒ **不**开记忆（request 不读 input 里的标记）");
   gate.decide({ approvalId: "a_1", action: "allowOnce" }); // 无 remember
   await p;
-  ok(gate.isAlwaysAllowed("sC12", "write") === false, "[C12] 🔴 模型侧无路径可开 always-allow（只有 IPC 的 decide 能）");
+  ok(gate.isAlwaysAllowed("sC12", "write", path.join(cwd, "a.txt")) === false, "[C12] 🔴 模型侧无路径可开 always-allow（只有 IPC 的 decide 能）");
 
   // (b) 读码交叉验证：index.js 的 APPROVAL_DECIDE handler 必须透传 remember
   //     此处用静态读取确认（行为层已由 C2/C7 覆盖）
@@ -440,10 +442,10 @@ console.log("\n[C13] ⚠ 审计密钥脱敏覆盖度（设计 §7.2/§7.3 的 KE
   ok(covOk === covered.length, "[C13] 设计 §7.3 明列的例子（Authorization: Bearer / export KEY=）均被脱敏", `covOk=${covOk}/${covered.length}`);
 
   // 端到端：确认遗漏是否已修复（此断言**原为 P2-1 取证**，曾断言「明文 ghp_REALSECRET123 落进审计」；
-  // 白客修复后输出为 <redacted>，故**反向**：现在必须断言明文不再落盘、且出现 <redacted>）。
+  // 协作方修复后输出为 <redacted>，故**反向**：现在必须断言明文不再落盘、且出现 <redacted>）。
   const clock = fakeClock();
   const { gate, audited } = makeGate();
-  const p = gate.request({ sessionId: "sC13", sceneId: "repo", toolName: "bash", input: { command: "GITHUB_TOKEN=ghp_REALSECRET123 npm publish" }, cwd });
+  const p = gate.request({ sessionId: "sC13", sceneId: "work", toolName: "bash", input: { command: "GITHUB_TOKEN=ghp_REALSECRET123 npm publish" }, cwd });
   gate.decide({ approvalId: "a_1", action: "allowOnce" });
   await p;
   const auditJson = JSON.stringify(audited);

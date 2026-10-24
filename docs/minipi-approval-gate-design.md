@@ -4,7 +4,7 @@
 > 上游：`docs/minipi-v0.4-impl-plan.md` §2.5（「同一个钩子两条规则」）、§3.3（写操作逐次确认）、§5 T1.5
 > 定位：**唯一来源**（本文件是 M4 审批闸门的施工依据，工程师按此实现，不要再另出设计）
 > 关联审计：`docs/minipi-v0.4-impl-audit.md` §7.5 —— 当前唯一 P0 安全缺口（`repo` 无防线）
-> 状态：**M4 实现中（设计↔实现对账已闭环）**。`protocol.js` 契约（M4.2，白客）**已落地**；`approval.js`（M4.1，白客）**已补齐 R3/R4/R5 + T5**；`session.js` 脱敏归一（R6）**已闭环**；接线（M4.3/M4.4）与渲染层（M4.5）为后续。§9.4 对账表 **v1.1.5 全部 ✅**
+> 状态：**M4 实现中（设计↔实现对账已闭环）**。`protocol.js` 契约（M4.2，协作方）**已落地**；`approval.js`（M4.1，协作方）**已补齐 R3/R4/R5 + T5**；`session.js` 脱敏归一（R6）**已闭环**；接线（M4.3/M4.4）与渲染层（M4.5）为后续。§9.4 对账表 **v1.1.5 全部 ✅**
 
 > **v1.1 修订说明（2026-09-23）**：按 team-lead 裁决，对齐**任务 #3**（用户早已拍板的 UI 语义，此前因 M4 主体未做而悬空）：
 > 1. **按钮由 2 个 → 3 个**：`allowOnce` / `deny` / `terminate`（中文术语：**「允许一次 / 拒绝 / 中断整轮」**）。触及 §2.2、§3.1、§4、§5.3、§9.1、§9.2、§9.3。
@@ -12,15 +12,15 @@
 > 3. **M4.0 异步钩子探针取消**：已由 vendor 源码**确证**钩子支持 `await`（`types.d.ts:902` + `runner.js:753`）⇒ **走路径 A**；B / B′ 退路作废。触及 §2.3、§2.4、§11。
 > 4. **补记 vendor 实证**：`terminate` 的 every 语义（`types.d.ts:822-826` 原文）、`block` 短路返回（`runner.js:756-758`）、`event.input` 可变（`types.d.ts:721-722`）。
 >
-> **v1.1.1 修订说明（2026-09-23）**：读了白客已落地的 M4.2 契约与进行中的 M4.1 `approval.js`，做**实现↔设计对账**（新增 §9.4）：R1/R2 命名收敛（本设计改）；**R3/R4/R5 三处需白客补齐**（terminate 专属文案、卡片 `actions`/`alwaysAllowEligible` 字段、会话级 always-allow）。已同步白客。
+> **v1.1.1 修订说明（2026-09-23）**：读了协作方已落地的 M4.2 契约与进行中的 M4.1 `approval.js`，做**实现↔设计对账**（新增 §9.4）：R1/R2 命名收敛（本设计改）；**R3/R4/R5 三处需协作方补齐**（terminate 专属文案、卡片 `actions`/`alwaysAllowEligible` 字段、会话级 always-allow）。已同步协作方。
 >
-> **v1.1.2 修订说明（2026-09-23）**：按 team-lead 裁定，**固化「`action` 字段值三值为唯一合法写法」为红线**（§9.2 脚注）。并做**全文两值残留核对**——结论：**无残留**。§9.2 表格（`:571`）、§9.1 常量（`:560`）、§3.1（`:154`）、§3.6（`:246`）、§2.5（`:133`）**均为三值**；`§10`/`§11`/修订说明中的「允许/拒绝」为**中文术语或历史叙述**，非字段值，**不改**。（白客发现的两值印象来自 v1.0/v1.1 早期快照；v1.1 起已改。）同时修正 §1 前置事实的**重复编号**（原两个 `5.`，已顺延为 5–8）。
+> **v1.1.2 修订说明（2026-09-23）**：按 team-lead 裁定，**固化「`action` 字段值三值为唯一合法写法」为红线**（§9.2 脚注）。并做**全文两值残留核对**——结论：**无残留**。§9.2 表格（`:571`）、§9.1 常量（`:560`）、§3.1（`:154`）、§3.6（`:246`）、§2.5（`:133`）**均为三值**；`§10`/`§11`/修订说明中的「允许/拒绝」为**中文术语或历史叙述**，非字段值，**不改**。（协作方发现的两值印象来自 v1.0/v1.1 早期快照；v1.1 起已改。）同时修正 §1 前置事实的**重复编号**（原两个 `5.`，已顺延为 5–8）。
 >
-> **v1.1.3 修订说明（2026-09-23）**：**终态对账**（§9.4）。白客已在 M4.1 中补齐 R3/R4/R5，并额外修复 **T5 定时器泄漏**（用户超时前批卡、`setTimeout` 仍在跑 ⇒ 5 分钟后 `_onTimeout` 误触发）。**§9.4 对账表至此全部闭环**（R1–R5 + T5 均 ✅）。秦戈独立 QA 可逐条打勾。
+> **v1.1.3 修订说明（2026-09-23）**：**终态对账**（§9.4）。协作方已在 M4.1 中补齐 R3/R4/R5，并额外修复 **T5 定时器泄漏**（用户超时前批卡、`setTimeout` 仍在跑 ⇒ 5 分钟后 `_onTimeout` 误触发）。**§9.4 对账表至此全部闭环**（R1–R5 + T5 均 ✅）。安全评审独立 QA 可逐条打勾。
 >
-> **v1.1.4 修订说明（2026-09-23）**：**修正 §7.2 的事实前提错误**（白客实现中发现，team-lead 核实）。原文「复用 `session.js` 的 `sanitizeDetail` 口径」**方向写反**——经核实 `sanitizeDetail`（`session.js:77-93`）**只实现 ①②④、缺 ③ 密钥**，其 JSDoc 却承诺含密钥脱敏（承诺≠实现）。**正确架构关系**：脱敏口径**权威定义在 §7.2**，`approval.js` 导出 `redactSecrets()`/`sanitizeForAudit()` 为**唯一实现点**，`sanitizeDetail`（29 处调用点）**import 复用**。已同步修正 §7.2 正文 + §13 自检第 6 项。「复用 X」vs「由 Y 定义、X 复用」是两种不同架构关系，写反会导致后人误在 session 侧「补一份」⇒ 回到双份实现。
+> **v1.1.4 修订说明（2026-09-23）**：**修正 §7.2 的事实前提错误**（协作方实现中发现，team-lead 核实）。原文「复用 `session.js` 的 `sanitizeDetail` 口径」**方向写反**——经核实 `sanitizeDetail`（`session.js:77-93`）**只实现 ①②④、缺 ③ 密钥**，其 JSDoc 却承诺含密钥脱敏（承诺≠实现）。**正确架构关系**：脱敏口径**权威定义在 §7.2**，`approval.js` 导出 `redactSecrets()`/`sanitizeForAudit()` 为**唯一实现点**，`sanitizeDetail`（29 处调用点）**import 复用**。已同步修正 §7.2 正文 + §13 自检第 6 项。「复用 X」vs「由 Y 定义、X 复用」是两种不同架构关系，写反会导致后人误在 session 侧「补一份」⇒ 回到双份实现。
 >
-> **v1.1.5 修订说明（2026-09-23）**：**R6 闭环**。`session.js:64` 已 `import { redactSecrets } from "./approval.js"`，`sanitizeDetail` 第 3 步（`:100-101`）已接入，**顺序为「路径替换之后、截断之前」**（正确——放截断后会让超长文本的密钥被截半而漏脱）。**§9.4 对账表 R1–R6 + T5 全部 ✅**。**编号已整理**：不再有「已闭环却列在待办段」的不一致。**历史说明段保留**（记录「设计曾写反方向、`sanitizeDetail` 曾缺第 3 步」），作为防复发依据。唯一遗留：`approval.js:136` 注释仍写反（「抄 session.js」），**归白客修正**（第三处方向写反，代码侧）。
+> **v1.1.5 修订说明（2026-09-23）**：**R6 闭环**。`session.js:64` 已 `import { redactSecrets } from "./approval.js"`，`sanitizeDetail` 第 3 步（`:100-101`）已接入，**顺序为「路径替换之后、截断之前」**（正确——放截断后会让超长文本的密钥被截半而漏脱）。**§9.4 对账表 R1–R6 + T5 全部 ✅**。**编号已整理**：不再有「已闭环却列在待办段」的不一致。**历史说明段保留**（记录「设计曾写反方向、`sanitizeDetail` 曾缺第 3 步」），作为防复发依据。唯一遗留：`approval.js:136` 注释仍写反（「抄 session.js」），**归协作方修正**（第三处方向写反，代码侧）。
 
 ---
 
@@ -546,7 +546,7 @@ tool_call(event) → 规则 2：
 
 ### 9.1 新增常量
 
-> **⚠ 对账说明（v1.1.1，2026-09-23）**：M4.2 已由白客落地到 `src/shared/protocol.js`。下列**以实际落地的为准**，本设计已按实际收敛（差异处标注）。核对结论：实质一致，仅命名 `APPROVAL_CARD_ACTIONS → APPROVAL_ACTION_IDS`（等价别名）、`APPROVAL_TERMINATED` 未单列（terminate 归入 `APPROVAL_DENIED` + 专属 reason）。
+> **⚠ 对账说明（v1.1.1，2026-09-23）**：M4.2 已由协作方落地到 `src/shared/protocol.js`。下列**以实际落地的为准**，本设计已按实际收敛（差异处标注）。核对结论：实质一致，仅命名 `APPROVAL_CARD_ACTIONS → APPROVAL_ACTION_IDS`（等价别名）、`APPROVAL_TERMINATED` 未单列（terminate 归入 `APPROVAL_DENIED` + 专属 reason）。
 
 ```js
 // INVOKE 增（已落地）
@@ -570,7 +570,7 @@ APPROVAL_COMMAND_MAX_CHARS: 500,              // 审计截断
 
 // 三 outcome 的合法取值（已落地）
 export const APPROVAL_ACTIONS = Object.freeze(["allowOnce", "deny", "terminate"]);
-export const APPROVAL_ACTION_IDS = APPROVAL_ACTIONS;   // 别名（白客落地的名字；本设计原叫 APPROVAL_CARD_ACTIONS）
+export const APPROVAL_ACTION_IDS = APPROVAL_ACTIONS;   // 别名（协作方落地的名字；本设计原叫 APPROVAL_CARD_ACTIONS）
 
 // 审批工具名单（与 sandbox.WRITE_TOOLS 区分，已落地）
 export const APPROVAL_TOOLS = Object.freeze(["write", "edit", "bash", "powershell"]);
@@ -630,32 +630,32 @@ export const APPROVAL_TOOLS = Object.freeze(["write", "edit", "bash", "powershel
 
 > `phase:"cancel"` 时 `batch` 可为空数组（只撤卡）。**不新增事件 type**（与 `OutcomeCard` 同款推送哲学）。`actions` 恒为三项——渲染层画三个按钮：**允许一次 / 拒绝 / 中断整轮**（顺序即数组顺序）。
 
-### 9.4 与白客 M4.2/M4.1 落地的**对账清单**（v1.1.5，2026-09-23）
+### 9.4 与协作方 M4.2/M4.1 落地的**对账清单**（v1.1.5，2026-09-23）
 
 我读了实际代码（`src/shared/protocol.js`、`src/main/pi/approval.js`、`src/main/pi/session.js`）逐条对账。**R1–R6 + T5 全部闭环**：
 
 | # | 项 | 落地现状 | 结论 |
 |---|---|---|---|
-| R1 | 命名 `APPROVAL_ACTION_IDS` vs 本设计 `APPROVAL_CARD_ACTIONS` | 白客用 `APPROVAL_ACTION_IDS`（`protocol.js:352`） | ✅ **本设计收敛为实际名**（§9.1）。前端按 `APPROVAL_ACTION_IDS` import |
-| R2 | `APPROVAL_TERMINATED` 错误码 | 白客**未单列**，terminate 归 `APPROVAL_DENIED` | ✅ **本设计收敛**（§9.1 已删）——terminate/deny 用 **reason** 区分 |
+| R1 | 命名 `APPROVAL_ACTION_IDS` vs 本设计 `APPROVAL_CARD_ACTIONS` | 协作方用 `APPROVAL_ACTION_IDS`（`protocol.js:352`） | ✅ **本设计收敛为实际名**（§9.1）。前端按 `APPROVAL_ACTION_IDS` import |
+| R2 | `APPROVAL_TERMINATED` 错误码 | 协作方**未单列**，terminate 归 `APPROVAL_DENIED` | ✅ **本设计收敛**（§9.1 已删）——terminate/deny 用 **reason** 区分 |
 | **R3** | **terminate 的拒绝文案** | `approval.js:673-675`：`action === "terminate" ? DENY_REASON_TERMINATE : DENY_REASON_USER`；`DENY_REASON_TERMINATE` 已导出（`:81`） | ✅ **闭环**——三套文案分开，模型可区分「这条被拒」与「整轮被停」 |
-| **R4** | **卡片字段 `actions` / `alwaysAllowEligible` 等** | `_pushCard()`（`approval.js:808-823`）含 `sessionId`/`kind`/`toolName`/`title`/`actions`/`alwaysAllowEligible`；`cardMeta()`（`:981`）统一提取；cancel 路径（`:791-800`）也带 `sessionId`/`actions` | ✅ **闭环**——方砚可据 `card.actions` 画三按钮、据 `alwaysAllowEligible` 画勾选框 |
+| **R4** | **卡片字段 `actions` / `alwaysAllowEligible` 等** | `_pushCard()`（`approval.js:808-823`）含 `sessionId`/`kind`/`toolName`/`title`/`actions`/`alwaysAllowEligible`；`cardMeta()`（`:981`）统一提取；cancel 路径（`:791-800`）也带 `sessionId`/`actions` | ✅ **闭环**——前端可据 `card.actions` 画三按钮、据 `alwaysAllowEligible` 画勾选框 |
 | **R5** | **会话级 always-allow（§3.6.2）** | `decide()` 接 `remember`（`:669`）；命中放行在 `request()`（`:585-590`，**在沙箱之后**）；`_enableAlwaysAllow`（`:707-732`）+ `isAlwaysAllowed`（`:735`）；`cancelBySession` 清记忆（`:689`）；审计 `always_allow_enabled`（`:723`） | ✅ **闭环**——默认关、仅内存、退出即失；**只接受 IPC 的 `remember:true`**（模型输入到不了 `decide`） |
 | **T5** | **定时器泄漏**（用户在超时前批卡，`setTimeout` 仍在跑 ⇒ 5 分钟后 `_onTimeout` 误触发） | `_settle()` 对所有 outcome 都 `clearTimeout`（`:761`）；`_settle` 开头 settled 早退（`:758`）；`_onTimeout` 开头 settled 早退（`:745`） | ✅ **闭环**——fail-closed 双保险，已决卡不再二次推卡 / 误记 timeout 审计 |
 | **R6** | **脱敏口径的**方向**（三处实现归一）** | `approval.js` 是**唯一实现点**（`redactSecrets :208`、`sanitizeForAudit :230`）；`session.js:64` **已 `import { redactSecrets } from "./approval.js"`**，`sanitizeDetail` 第 3 步（`:100-101`）已接入，**顺序为「路径替换之后、截断之前」**（`:78-80` 注释写明理由：放截断后 ⇒ 超长文本密钥可能被截一半而漏脱） | ✅ **闭环**——双份实现已消除，密钥规则在 session 侧生效 |
 
-> **R1/R2 是纯命名收敛**（改本设计即可）；**R3/R4/R5/T5/R6 均已由白客实现**。**本对账表 v1.1.5 全部 ✅**，秦戈独立 QA 可逐条打勾。
+> **R1/R2 是纯命名收敛**（改本设计即可）；**R3/R4/R5/T5/R6 均已由协作方实现**。**本对账表 v1.1.5 全部 ✅**，安全评审独立 QA 可逐条打勾。
 
 > **⚠ 历史说明（保留，勿删 —— 这是 v1.1.4/v1.1.5 修订的理由记录）**：
 > - **设计曾写反脱敏口径的方向**：§7.2 原写「复用 `session.js` 的 `sanitizeDetail` 口径」，但 `sanitizeDetail` 当时**只实现 ①②④、缺 ③ 密钥**（其 JSDoc 却承诺含密钥脱敏 = 承诺≠实现）。**正确关系是「审批侧定义、session 侧复用」**（§7.2 已改）。
-> - **代码侧亦有第三处方向写反**：`approval.js:136` 注释曾为「口径**抄** `session.js` 的 `sanitizeDetail`」（错向）。**归白客修正**（他的文件）。
+> - **代码侧亦有第三处方向写反**：`approval.js:136` 注释曾为「口径**抄** `session.js` 的 `sanitizeDetail`」（错向）。**归协作方修正**（他的文件）。
 > - 保留本段的意义：后人若只看到「R6 ✅」而不知**曾经写反、曾缺第 3 步**，就无从理解 §7.2 为何要强调「权威定义在此」。**这不是流水账，是防复发的依据。**
 >
-> **T5 记功**：该缺陷打在「5 秒通道」的产品原点上——**用户批得越快越容易踩**，非边缘 case。白客报「114 项全绿」时未覆盖到它，印证「自测绿灯 ≠ 无洞」。**白客补修时已加专项断言**（allowOnce 后推进假时钟到超时点，不得再推卡/记 timeout 审计）。
+> **T5 记功**：该缺陷打在「5 秒通道」的产品原点上——**用户批得越快越容易踩**，非边缘 case。协作方报「114 项全绿」时未覆盖到它，印证「自测绿灯 ≠ 无洞」。**协作方补修时已加专项断言**（allowOnce 后推进假时钟到超时点，不得再推卡/记 timeout 审计）。
 >
 > **「§9.2 两值残留」已核实不存在**：`approval.js` 侧 grep 无 `"allow"` 字面量（只有 `"allowOnce"`），本设计 §9.2 表格 `:571` 本就是三值。系早期快照误读，**已加红线脚注固化**（§9.2）。
 >
-> **对账的正面结论（始终一致，无实质冲突）**：白客的三 outcome（`APPROVAL_ACTIONS` 三值）、terminate every 语义注释、批合并（`_sessionCard` 按 sessionId）、超时默认拒绝（`_onTimeout` → deny + timeout reason）、重启丢弃（`_sweepOnStart`）、审计脱敏——**均与本设计一致**。
+> **对账的正面结论（始终一致，无实质冲突）**：协作方的三 outcome（`APPROVAL_ACTIONS` 三值）、terminate every 语义注释、批合并（`_sessionCard` 按 sessionId）、超时默认拒绝（`_onTimeout` → deny + timeout reason）、重启丢弃（`_sweepOnStart`）、审计脱敏——**均与本设计一致**。
 
 ---
 
