@@ -1,8 +1,8 @@
 {
   "name": "minipi",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "minipi · 常驻桌面的 Pi 悬浮球（Electron 宿主层 + Pi SDK 接线；M0 + M1 核心）",
+  "description": "minipi · 常驻桌面的 AI 悬浮球。选中即问、随时续聊，会话与数据全部留在本机。",
   "type": "module",
   "main": "src/main/index.js",
   "engines": {
@@ -27,6 +27,7 @@
     "verify:all": "node scripts/verify-all.mjs",
     "verify:launcher": "node scripts/verify-launcher.mjs",
     "verify:launch-live": "node scripts/verify-launch-live.mjs",
+    "verify:logger": "node scripts/verify-logger.mjs",
     "launch": "node scripts/launch.mjs",
     "qa:outcome-entry": "node scripts/qa-outcome-entry.mjs",
     "verify:models": "node scripts/verify-models.mjs",
@@ -35,13 +36,25 @@
     "qa:mini-continuity": "node scripts/qa-mini-continuity.mjs",
     "qa:model-panel": "node scripts/qa-model-panel.mjs",
     "verify:live": "node scripts/verify-sandbox-live.mjs",
-    "postinstall": "node scripts/check-electron.mjs"
+    "postinstall": "node scripts/check-electron.mjs",
+    "build:icon": "node scripts/build-icon.mjs",
+    "build": "node scripts/build-release.mjs",
+    "build:dir": "node scripts/build-release.mjs --dir",
+    "build:win": "node scripts/build-release.mjs --win",
+    "build:mac": "node scripts/build-release.mjs --mac",
+    "verify:packaged": "node scripts/verify-packaged.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.0",
-    "docx": "9.7.1"
+    "@earendil-works/pi-coding-agent": "1.3.0",
+    "docx": "9.7.1",
+    "typebox": "1.3.27"
   },
   "devDependencies": {
-    "electron": "44.4.3"
-  }
+    "electron": "44.4.3",
+    "electron-builder": "^26.15.3"
+  },
+  "author": {
+    "name": "minipi"
+  },
+  "license": "MIT"
 }
